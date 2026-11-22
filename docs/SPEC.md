@@ -205,6 +205,47 @@ Destroying a share means, in this order: delete the wrapped OPRF key, delete the
 
 The server never logs a share id together with an IP address, never logs request bodies, tokens or tags, and does not persist IP addresses.
 
+### 7.1 Wire conventions
+
+Both the server and the web client build to these rules. Where this subsection and an implementation disagree, the implementation is wrong.
+
+| Item | Encoding |
+| --- | --- |
+| `{id}` in paths and `id` in JSON | base64url of the 16 byte share id (22 characters) |
+| `blinded`, `evaluated`, `access_tag`, `access_verifier`, `owner_verifier` | base64url of 32 bytes |
+| `upload_token`, `grant` | base64url of 32 random bytes |
+| `manifest` in the `open` response | base64url of `manifest_ct` |
+| `expires_at` | integer, Unix seconds |
+| `suite` | the string `tightlip-v1` |
+| `files[].size` in the `open` response | ciphertext length in bytes, as stored |
+| `views_left`, `attempts_left`, `ttl_seconds`, `max_views`, `n` | non-negative integers |
+
+JSON requests send `Content-Type: application/json`. Unknown JSON fields are rejected. Binary uploads send `Content-Type: application/octet-stream`. Successful `PUT` and `DELETE` requests return `204` with no body. `commit` returns `204`.
+
+Errors return JSON `{"error": "<code>"}` with exactly these pairs:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `bad_request` | malformed JSON, encoding, suite or value out of range |
+| 401 | `unauthorized` | wrong access tag, upload token, grant or owner token on a live share |
+| 404 | `not_found` | every missing, expired, burned or pending share on a recipient route, and unknown routes |
+| 409 | `conflict` | upload to a committed share, file index out of order, commit twice |
+| 413 | `too_large` | a size or count limit |
+| 429 | `rate_limited` | the create limit, with a `Retry-After` header in seconds |
+
+### 7.2 Static routes
+
+The same process serves the web bundle from `TIGHTLIP_WEB_DIR` (default `./web/dist`).
+
+| Path | Response |
+| --- | --- |
+| `/` and `/s/{id}` | `index.html`, `Cache-Control: no-cache` |
+| `/assets/*` | the file, `Cache-Control: public, max-age=31536000, immutable` |
+| `/healthz` | `200`, body `ok` |
+| anything else outside `/api/v1` | `404` |
+
+The web client reads the share id from the path and the link secret from the fragment.
+
 ## 8. Web delivery
 
 The web app is a static bundle with content hashed file names. The server sends these headers on every response:
