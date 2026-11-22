@@ -77,7 +77,7 @@ impl Blobs for Disk {
         }))
     }
 
-    fn download(&self, key: &BlobKey) -> Result<Body> {
+    fn download(&self, key: &BlobKey, start: u64, len: u64) -> Result<Body> {
         let file = File::open(self.path(key, "blob")).map_err(|error| {
             if error.kind() == ErrorKind::NotFound {
                 Error::Missing
@@ -85,7 +85,7 @@ impl Blobs for Disk {
                 error.into()
             }
         })?;
-        Ok(file_body(file))
+        Ok(file_body(file, start, len)?)
     }
 
     fn remove(&self, key: &BlobKey) -> Result<()> {

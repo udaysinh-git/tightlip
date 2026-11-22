@@ -1,10 +1,17 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import solid from "@solidjs/vite-plugin";
 import { defineConfig } from "vite";
 import { devMock } from "./dev/vite-mock.ts";
 import { delivery, solidRuntime, verifyTemplates } from "./scripts/delivery.ts";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  define: {
+    __TIGHTLIP_WASM_INTEGRITY__: JSON.stringify(command === "build"
+      ? `sha384-${createHash("sha384").update(readFileSync(new URL("./pkg/client/tightlip_bg.wasm", import.meta.url))).digest("base64")}`
+      : ""),
+  },
   plugins: [solid({ solid: { moduleName: solidRuntime } }), verifyTemplates(), delivery(), devMock()],
   resolve: {
     alias: {
@@ -19,4 +26,4 @@ export default defineConfig({
     cssCodeSplit: false,
     rolldownOptions: { output: { comments: { legal: true } } },
   },
-});
+}));

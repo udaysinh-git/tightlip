@@ -6,7 +6,7 @@ Deployed at `tightlip.buildwithkuro.tech` on KuroPanel. `tightlip.dev` is the do
 
 ## What it has to beat
 
-In February 2026 an ETH Zurich team published attacks on Bitwarden, LastPass and Dashlane under a malicious-server model (Scarlata, Torrisi, Backendal, Paterson, "Zero Knowledge (About) Encryption", USENIX Security 2026, ePrint 2026/058). Twelve of the attacks hit Bitwarden. The classes they found, plus two older results, are the checklist for this design.
+In February 2026 an ETH Zurich team published attacks on Bitwarden, LastPass, Dashlane and 1Password under a malicious-server model (Scarlata, Torrisi, Backendal, Paterson, "Zero Knowledge (About) Encryption", USENIX Security 2026, ePrint 2026/058). Twelve of the attacks hit Bitwarden. The classes they found, plus two older results, are the checklist for this design.
 
 | Weakness in existing tools | Source | What Tightlip does |
 | --- | --- | --- |
@@ -15,15 +15,15 @@ In February 2026 an ETH Zurich team published attacks on Bitwarden, LastPass and
 | Public keys arrive unauthenticated, so the server can substitute its own | ePrint 2026/058 | Identity keys sign every key bundle. Contacts are pinned on first use and can be verified by a short phrase. |
 | Legacy formats stay accepted, so the server can downgrade | ePrint 2026/058 | One suite per version, no negotiation, no fallback path in the code. |
 | AEADs that do not commit to the key allow partitioning oracle attacks on password protected data | Len, Grubbs, Ristenpart, USENIX Security 2021 | All encryption goes through a committing wrapper that binds key, nonce and associated data (Bellare and Hoang, Eurocrypt 2022; Albertini et al., USENIX Security 2022). |
-| A share password is an offline guessing target once someone holds the ciphertext | common design | Keys pass through a per share OPRF (RFC 9497) held by the server. Each guess costs one rate limited request, and the server cannot see the password or the link secret. |
-| Deleting a row leaves ciphertext in backups and on disk | common design | Expiry and the last view destroy the per share OPRF key. Without it the ciphertext cannot be decrypted, even with the link. |
+| A share password is an offline guessing target once someone holds the ciphertext | common design | Keys pass through a per share OPRF (RFC 9497) held by the server. Each online guess spends a share attempt. The intended client keeps the password and link secret in the browser. |
+| Deleting a row leaves ciphertext in backups and on disk | common design | Expiry and the last view logically delete the wrapped per-share OPRF key. Old copies can persist in snapshots, backups and freed storage. |
 | Ciphertext length reveals the secret length | Nikitin et al., PURBs, PETS 2019 | Padmé padding, with a 512 byte floor for small secrets. |
-| Harvest now, decrypt later | NIST FIPS 203 | Link shares are symmetric only (256 bit). Vault sharing uses X-Wing, the X25519 plus ML-KEM-768 hybrid. |
+| Harvest now, decrypt later | NIST FIPS 203 | The 256-bit link secret protects confidentiality from someone without the link. Burn, expiry and password guess limits also depend on the classical ristretto255 OPRF. Vault sharing is planned to use X-Wing, the X25519 plus ML-KEM-768 hybrid. |
 | A stolen server database can be brute forced | common design | Accounts use OPAQUE (RFC 9807) plus a 256 bit secret key that stays on the device. The server holds nothing that can be guessed offline. |
 
-No web app can fully solve one problem: the server delivers the JavaScript that does the encryption. Tightlip narrows it with a static bundle, a strict CSP, Trusted Types, subresource integrity, no third party origins and reproducible builds with published hashes. The manifest format follows the WAICT proposal (Mozilla and Cloudflare, prototype in Firefox Nightly since May 2026) so browsers can enforce it once that ships. A CLI and a browser extension close the gap for people who need it closed.
+The server delivers the code that handles plaintext, passwords and link secrets. CSP and Trusted Types limit some injection, and integrity checks detect changes to resources covered by the hashes the client receives. The server can replace the page and its hashes together. A build generates a file-hash manifest for independent comparison once a trusted copy is available. External publication and signing, WAICT enrolment, a CLI and a browser extension are future work.
 
-Tightlip has had no outside audit. Until it has one, the README says so and makes no claim of being stronger than audited products.
+An independent review covered commit `806ec31` and the deployment available at the time. Its findings guide hardening work.
 
 ## Stack
 
@@ -41,7 +41,7 @@ Tightlip has had no outside audit. Until it has one, the README says so and make
 
 A visitor with no account pastes text, fills in a login, or drops images and files. They pick an expiry, a view limit and an optional password, and get a link. The secret half of the link sits after the `#` and never reaches the server. The recipient opens the link, presses reveal, and reads or downloads the content. Link previews from chat apps cannot consume a view because nothing is spent until reveal.
 
-The server stores ciphertext, an expiry, two counters and two verifier hashes. It stores no file names, no content types and no IP addresses.
+The server stores the share ID, expiry and pending deadline, password flag, view and attempt counts, wrapped OPRF key, encrypted manifest and files, access and owner verifier hashes, upload token hash, file indices, blob identifiers and ciphertext sizes. It also stores grant hashes and expiry times, hashes of successful open request IDs with their view counts and deadlines, the final-attempt deadline, storage accounting and pending blob deletions. File names and types are inside the encrypted manifest. The Rust process keeps IP buckets in memory. Proxy logging depends on the deployment.
 
 ## Milestones
 
@@ -57,7 +57,7 @@ Gate: `cargo test -p tightlip-core` and `cargo clippy --all-targets -- -D warnin
 
 `crates/server` implements the API in SPEC section 7 with SQLite and disk blobs, the expiry sweeper, rate limits, security headers and `/healthz`.
 
-Gate: integration tests drive a full create, eval, open, download and delete cycle over HTTP using `tightlip-core` as the client. They prove that a view limit holds under 50 concurrent opens, that missing, expired and burned shares are indistinguishable, and that no OPRF key or blob survives expiry.
+Gate: integration tests drive a full create, eval, open, download and delete cycle over HTTP using `tightlip-core` as the client. They check the view limit under concurrent opens, the status and body for unavailable shares, and logical key and blob removal through the storage layer.
 
 ### M3: web app
 

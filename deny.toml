@@ -1,0 +1,16 @@
+[advisories]
+# voprf uses elliptic-curve for ExpandMsgXmd with ristretto255. Secret scalar
+# operations on this path use curve25519-dalek.
+ignore = [
+    { id = "RUSTSEC-2026-0387", reason = "Tightlip's ristretto255 path does not use crypto-bigint for secret arithmetic" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

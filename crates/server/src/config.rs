@@ -4,7 +4,9 @@
 //! `TIGHTLIP_TOTAL_CIPHERTEXT_BYTES`, `TIGHTLIP_STORAGE_BYTES`, `TIGHTLIP_PENDING_LIFETIME_SECONDS`,
 //! and `TIGHTLIP_CREATES_PER_IP` (per hour).
 
-use std::{env, path::PathBuf, str::FromStr};
+use std::{env, fs::File, io::Read, path::PathBuf, str::FromStr};
+
+use subtle::ConstantTimeEq;
 
 use thiserror::Error;
 use tightlip_core::Secret32;
@@ -66,10 +68,7 @@ impl Config {
 
     pub fn from_env() -> Result<Self, ConfigError> {
         let get = read_env;
-        let kek = value(&get, "TIGHTLIP_KEK", |value| {
-            decode_secret(&Zeroizing::new(value))
-        })?
-        .ok_or(ConfigError("TIGHTLIP_KEK"))?;
+        let kek = load_kek(&get)?;
 
         let mut limits = Limits::default();
         // Range and attempt offsets are pairs, so each table row has one setting.
@@ -134,6 +133,53 @@ impl Config {
     }
 }
 
+fn load_kek(
+    get: &impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
+) -> Result<Secret32, ConfigError> {
+    const FILE: &str = "TIGHTLIP_KEK_FILE";
+    const ENV: &str = "TIGHTLIP_KEK";
+    if let Some(path) = get(FILE)? {
+        return read_kek_file(&path).ok_or(ConfigError(FILE));
+    }
+    value(get, ENV, |value| validate_kek(&Zeroizing::new(value)))?.ok_or(ConfigError(ENV))
+}
+
+fn validate_kek(text: &str) -> Option<Secret32> {
+    let key = decode_secret(text)?;
+    valid_kek(&key).then_some(key)
+}
+
+pub(crate) fn valid_kek(key: &Secret32) -> bool {
+    let repeated = Zeroizing::new([key.as_bytes()[0]; 32]);
+    !bool::from(key.as_bytes().ct_eq(&*repeated))
+}
+
+fn read_kek_file(path: &str) -> Option<Secret32> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o044 != 0 {
+            return None;
+        }
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(46));
+    file.take(46).read_to_end(&mut bytes).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let text = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text);
+    validate_kek(text)
+}
+
 fn read_env(name: &'static str) -> Result<Option<String>, ConfigError> {
     match env::var(name) {
         Ok(value) => Ok(Some(value)),
@@ -163,4 +209,38 @@ fn number<T: FromStr>(
     default: T,
 ) -> Result<T, ConfigError> {
     Ok(value(get, name, |input| input.parse().ok())?.unwrap_or(default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tightlip_core::b64;
+
+    #[test]
+    fn rejects_repeated_bytes_and_prefers_the_key_file() {
+        let repeated = b64::encode(&[0x77; 32]);
+        assert!(validate_kek(&repeated).is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kek");
+        let key = Secret32::generate().unwrap();
+        std::fs::write(&path, format!("{}\n", b64::encode(key.as_bytes()))).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let get = |name| match name {
+            "TIGHTLIP_KEK_FILE" => Ok(Some(path.to_str().unwrap().to_owned())),
+            _ => panic!("the file takes precedence"),
+        };
+        assert!(bool::from(
+            load_kek(&get).unwrap().as_bytes().ct_eq(key.as_bytes())
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+            assert!(load_kek(&get).is_err());
+        }
+    }
 }

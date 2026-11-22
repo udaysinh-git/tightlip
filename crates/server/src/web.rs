@@ -22,6 +22,68 @@ pub(crate) async fn index(State(server): State<Server>) -> Result<Response> {
         .await
 }
 
+// Share pages carry a key in their fragment and must never be indexed or previewed as content.
+pub(crate) async fn share_index(State(server): State<Server>) -> Result<Response> {
+    let mut response = index(State(server)).await?;
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-robots-tag"),
+        header::HeaderValue::from_static("noindex, nofollow, noarchive, nosnippet"),
+    );
+    Ok(response)
+}
+
+pub(crate) async fn robots(State(server): State<Server>) -> Result<Response> {
+    server
+        .run(|state| {
+            serve(
+                &state.web_dir,
+                FsPath::new("robots.txt"),
+                "public, max-age=3600",
+            )
+        })
+        .await
+}
+
+pub(crate) async fn sitemap(State(server): State<Server>) -> Result<Response> {
+    server
+        .run(|state| {
+            serve(
+                &state.web_dir,
+                FsPath::new("sitemap.xml"),
+                "public, max-age=3600",
+            )
+        })
+        .await
+}
+
+pub(crate) async fn og_image(State(server): State<Server>) -> Result<Response> {
+    server
+        .run(|state| {
+            serve(
+                &state.web_dir,
+                FsPath::new("og.png"),
+                "public, max-age=86400",
+            )
+        })
+        .await
+}
+
+pub(crate) async fn release(State(server): State<Server>) -> Result<Response> {
+    server
+        .run(|state| serve(&state.web_dir, FsPath::new("release.json"), "no-cache"))
+        .await
+}
+
+pub(crate) async fn security_txt() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        "Contact: mailto:security@kurolabs.in\nExpires: 2027-11-22T00:00:00Z\n",
+    )
+}
+
 pub(crate) async fn asset(
     State(server): State<Server>,
     path: std::result::Result<Path<String>, PathRejection>,
@@ -64,7 +126,7 @@ fn serve(web_dir: &FsPath, relative: &FsPath, cache: &'static str) -> Result<Res
             (header::CACHE_CONTROL, cache),
         ],
         [(header::CONTENT_LENGTH, size.to_string())],
-        file_body(file),
+        file_body(file, 0, size)?,
     )
         .into_response())
 }
@@ -101,6 +163,7 @@ fn content_type(path: &FsPath) -> &'static str {
         Some("ttf") => "font/ttf",
         Some("otf") => "font/otf",
         Some("txt") => "text/plain; charset=utf-8",
+        Some("xml") => "application/xml; charset=utf-8",
         _ => "application/octet-stream",
     }
 }

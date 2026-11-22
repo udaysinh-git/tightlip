@@ -15,7 +15,8 @@ import type { PickedFile } from "./upload-dropzone";
 import { changeView, paperDust } from "./transitions";
 import { sealedEvent } from "./logo";
 import { playSound } from "./share-sounds";
-import { supportedImage } from "./image-types";
+import { rasterType, scrubType } from "./image-types";
+import { Icon } from "./icons";
 import { limits } from "./wire";
 import { loginFields } from "./worker-protocol";
 import type { Content, Created, Login, LoginField, Progress } from "./worker-protocol";
@@ -36,7 +37,13 @@ export function Compose(props: { client: CryptoClient }) {
   const [uploading, setUploading] = createSignal(false);
   const [uploadPointer, setUploadPointer] = createSignal(false);
   const [progress, setProgress] = createSignal<Progress>();
+  const [splitKey, setSplitKey] = createSignal(false);
   const [created, setCreated] = createSignal<Created & { ttl: number; views: number }>();
+  const visibleLink = () => {
+    const link = created()?.link ?? "";
+    return splitKey() ? link.split("#", 1)[0] ?? link : link;
+  };
+  const separateKey = () => created()?.link.split("#")[1] ?? "";
   const feedback = createFeedback();
   let submitPointer = false;
   let creating = false;
@@ -51,23 +58,36 @@ export function Compose(props: { client: CryptoClient }) {
     setPicked([]);
   }
 
-  onCleanup(clearFiles);
+  let disposed = false;
+  onCleanup(() => { disposed = true; clearFiles(); });
   onCleanup(() => stopDust?.());
 
-  function pick(files: FileList, pointer: boolean) {
-    const incoming = Array.from(files);
+  async function pick(files: FileList, pointer: boolean) {
+    if (files.length > limits.files) {
+      feedback.notify("Pick up to 20 files.", true);
+      return;
+    }
+    const incoming = await Promise.all(Array.from(files, async (file) => ({
+      file, head: new Uint8Array(await file.slice(0, 12).arrayBuffer().catch(() => new ArrayBuffer(0))),
+    })));
     void changeView("files", () => {
+      if (disposed || busy() || kind() !== "files") return;
       const old = picked();
       if (old.length + incoming.length > limits.files
-        || [...old.map((item) => item.file), ...incoming].reduce((size, file) => size + file.size, 0)
+        || [...old.map((item) => item.file), ...incoming.map((item) => item.file)].reduce((size, file) => size + file.size, 0)
           > limits.ciphertext) {
         feedback.notify("These files exceed the share limit. Pick up to 20 files totalling less than 25 MB.", true);
         return;
       }
       feedback.notify("");
-      setPicked([...old, ...incoming.map((file) => ({
-        file, thumbnail: supportedImage(file.type) ? URL.createObjectURL(file) : undefined,
-      }))]);
+      setPicked([...old, ...incoming.map(({ file, head }) => {
+        const type = rasterType(head);
+        return {
+          file,
+          metadataKept: !scrubType(head),
+          thumbnail: type ? URL.createObjectURL(new Blob([file], { type })) : undefined,
+        };
+      })]);
     }, pointer);
   }
 
@@ -92,19 +112,22 @@ export function Compose(props: { client: CryptoClient }) {
     }
   }
 
-  async function generate() {
+  async function generate(forShare = false) {
     if (creating) return;
     creating = true;
     setBusy(true);
     feedback.notify("");
     try {
-      updateField("password", await props.client.call("password", undefined));
+      const generated = await props.client.call("password", undefined);
+      if (forShare) setPassword(generated);
+      else updateField("password", generated);
     } catch (cause) {
       feedback.notify(message(cause), true);
     } finally {
       creating = false;
       flush(() => setBusy(false));
-      document.getElementById("login-password")?.focus({ preventScroll: true });
+      const field = forShare ? passwordField : document.getElementById("login-password");
+      field?.focus({ preventScroll: true });
     }
   }
 
@@ -131,6 +154,7 @@ export function Compose(props: { client: CryptoClient }) {
       });
       const share = await props.client.call("create", input, setProgress);
       await changeView("link", () => {
+        setSplitKey(false);
         setCreated({ ...share, ttl: input.ttl, views: input.views });
         setKind("text");
         setText("");
@@ -209,7 +233,7 @@ export function Compose(props: { client: CryptoClient }) {
             <div class="paper open-paper compose-paper" id="compose-content" role="tabpanel"
               aria-labelledby={`tab-${kind()}`} data-kind={kind()} data-motion-shared="">
               <Show when={kind() === "text"}>
-                <textarea id="share-text" class="note-text" aria-label="Secret text" placeholder="Write the secret here"
+                <textarea id="share-text" autocomplete="off" class="note-text" aria-label="Secret text" placeholder="Write the secret here"
                   spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" value={text()} onInput={(event) => {
                     setText(event.currentTarget.value);
                     feedback.notify("");
@@ -235,7 +259,7 @@ export function Compose(props: { client: CryptoClient }) {
                           </Show>
                         </span>
                       }>
-                        <textarea class="login-note" id={`login-${field}`} spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" value={login()[field] ?? ""}
+                        <textarea class="login-note" autocomplete="off" id={`login-${field}`} spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" value={login()[field] ?? ""}
                           rows={1} onInput={(event) => updateField(field, event.currentTarget.value)} />
                       </Show>
                     </div>
@@ -243,7 +267,7 @@ export function Compose(props: { client: CryptoClient }) {
                 </div>
               </Show>
               <Show when={kind() === "files"}>
-                <UploadDropzone disabled={busy()} items={picked()} pick={pick} remove={removeFile} />
+                <UploadDropzone disabled={busy()} items={picked()} pick={(files, pointer) => void pick(files, pointer)} remove={removeFile} />
               </Show>
             </div>
             <ContentTabs value={kind()} select={(value) => {
@@ -265,7 +289,7 @@ export function Compose(props: { client: CryptoClient }) {
               </button>{" "}
               <Show when={passwordOpen()}>
                 <PasswordStrength value={password()} change={setPassword}
-                  capture={(element) => { passwordField = element; }} />
+                  generate={() => void generate(true)} capture={(element) => { passwordField = element; }} />
               </Show>
             </fieldset>
             <UploadAction work={uploading()} busy={busy()} empty={!valid()} progress={progress()}
@@ -278,19 +302,36 @@ export function Compose(props: { client: CryptoClient }) {
       <section aria-label="Sealed share">
         <div class="paper folded-paper result-paper" data-motion-shared="" ref={(element) => { folded = element; }}>
           <Seal />
-          <div class="sealed-link">
-            <input class="mono" readonly spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" id="created-link" aria-label="Share link" value={share.link} />
-            <CopyButton label="Copy link" value={share.link} feedback={feedback.notify} />
+          <div class="sealed-credentials">
+            <div class="sealed-link">
+              <input class="mono" readonly spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" id="created-link" autocomplete="off" aria-label="Share link" value={visibleLink()} />
+              <CopyButton label={splitKey() ? "Copy link without key" : "Copy full link"}
+                value={visibleLink()} feedback={feedback.notify} />
+            </div>
+            <button class="icon-button split-key" type="button" title="Send the key separately"
+              aria-label="Send the key separately" aria-pressed={splitKey() ? "true" : "false"}
+              onClick={(event) => void changeView("link", () => setSplitKey((value) => !value), event.detail > 0)}>
+              <Icon name="lock" />
+            </button>
+            <Show when={splitKey()}>
+              <div class="sealed-link">
+                <input class="mono" readonly spellcheck="false" autocorrect="off" autocapitalize="off"
+                  autocomplete="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false"
+                  data-lt-active="false" aria-label="Share key" value={separateKey()} />
+                <CopyButton label="Copy key" value={separateKey()} feedback={feedback.notify} />
+              </div>
+            </Show>
           </div>
         </div>
         <p class="sentence">Burns after {viewLabel(share.views)} or in{" "}
           <Expiry seconds={share.expiresAt} label={expiryChoices.find((choice) => choice.value === share.ttl)?.label} />.
-          {" "}Only someone holding this link can read it.</p>
+          {" "}Opening it requires the link and its key.</p>
         <Feedback feedback={feedback} />
         <div class="result-actions">
           <button class="quiet-button" type="button" disabled={busy()} onClick={startAgain}>Seal another</button>
           <HoldDelete disabled={busy()} confirm={(pointer) => void removeShare(pointer)} />
-          <CopyButton primary label="Copy link" value={share.link} feedback={feedback.notify} />
+          <CopyButton primary label={splitKey() ? "Copy link without key" : "Copy link"}
+            value={visibleLink()} feedback={feedback.notify} />
         </div>
         <span class="visually-hidden" id="delete-help">Hold Burn now to confirm.</span>
       </section>

@@ -15,10 +15,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install stable Rust
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
-          rustup default stable
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
@@ -30,7 +28,7 @@ jobs:
           node-version: "22.23.5"
           package-manager-cache: false
       - run: cargo install --locked --version 0.2.130 wasm-bindgen-cli
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: web
       - run: npm audit --audit-level=high
         working-directory: web
@@ -40,3 +38,20 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+  independent-vectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -m venv .vector-venv
+      - run: .vector-venv/bin/python -m pip install 'cryptography==48.0.1' 'argon2-cffi==25.1.0'
+      - run: .vector-venv/bin/python tools/vectors/verify.py
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo install --locked --version 0.22.0 cargo-deny
+      - run: cargo deny check advisories bans sources

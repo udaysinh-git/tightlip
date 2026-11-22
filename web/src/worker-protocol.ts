@@ -24,13 +24,15 @@ export interface VisibleFile {
   orientation?: number;
 }
 
-export interface RevealedFile extends VisibleFile {
-  blob: Blob;
+export interface RevealedFile extends Omit<VisibleFile, "mime"> {
+  download: Blob;
+  preview?: Blob;
 }
 
 export interface Revealed extends Content {
   files: RevealedFile[];
   failedFiles: string[];
+  retryUntil?: number;
   viewsLeft?: number;
 }
 
@@ -61,6 +63,7 @@ export interface Operations {
   password: { input: undefined; output: string };
   load: { input: { path: string; fragment: string }; output: Metadata };
   reveal: { input: { password?: string }; output: Revealed };
+  retryDownload: { input: undefined; output: Pick<Revealed, "files" | "failedFiles" | "retryUntil"> };
 }
 
 export type Operation = keyof Operations;

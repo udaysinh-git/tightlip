@@ -4,7 +4,8 @@ import type { Plugin, PreviewServer } from "vite";
 import { shareId } from "../src/wire.ts";
 
 const securityHeaders = {
-  "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; media-src blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'",
+  "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types tightlip-templates tightlip-worker",
+  "Integrity-Policy": "blocked-destinations=(script)",
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "Cross-Origin-Opener-Policy": "same-origin",
@@ -25,6 +26,12 @@ function serveBuiltRoutes(server: PreviewServer) {
     if (path === "/" || shareId(path) !== undefined) {
       response.setHeader("Cache-Control", "no-cache");
       request.url = "/index.html";
+      next();
+      return;
+    }
+    if (path === "/.well-known/tightlip-release.json") {
+      response.setHeader("Cache-Control", "no-cache");
+      request.url = "/release.json";
       next();
       return;
     }

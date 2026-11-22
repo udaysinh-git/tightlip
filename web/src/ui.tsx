@@ -1,3 +1,4 @@
+import { fileNameParts, safeFileName } from "./attachments";
 import { Icon } from "./icons";
 import type { JSX } from "@solidjs/web";
 
@@ -38,6 +39,11 @@ export function Expiry(props: { seconds: number; label?: string }) {
   return <time datetime={date().toISOString()} title={format.format(date())}>
     {props.label ?? `Expires ${format.format(date())}`}
   </time>;
+}
+
+export function FileName(props: { name: string }) {
+  const parts = () => fileNameParts(safeFileName(props.name));
+  return <bdi>{parts()[0]}<span class="file-extension" dir="ltr">{parts()[1]}</span></bdi>;
 }
 
 export function fileSize(size: number): string {

@@ -227,7 +227,7 @@ impl Pending {
     fn commit_request(&self, body: Value) -> Request<Body> {
         json_request(
             Method::POST,
-            &format!("{}/commit", &self.path),
+            &format!("{}/commit", self.path),
             Some(&self.upload),
             body,
         )
@@ -236,7 +236,7 @@ impl Pending {
     fn put(&self, object: &str, body: Body) -> Request<Body> {
         request(
             Method::PUT,
-            &format!("{}/{object}", &self.path),
+            &format!("{}/{object}", self.path),
             Some(&self.upload),
             Some("application/octet-stream"),
             body,
@@ -1015,6 +1015,7 @@ async fn stalled_json_and_uploads_release_resources_at_their_deadlines() {
     assert_eq!(start.elapsed(), Duration::from_secs(10));
 
     let mut uploads = JoinSet::new();
+    let mut active_shares = Vec::new();
     for _ in 0..8 {
         let (started, ready) = tokio::sync::oneshot::channel();
         let chunks = futures_util::stream::once(async move {
@@ -1025,11 +1026,19 @@ async fn stalled_json_and_uploads_release_resources_at_their_deadlines() {
             chunks,
             futures_util::stream::pending(),
         ));
-        let upload = pending.put("files/0", body);
+        let share = Pending::create(&app, None, 1, 3600).await;
+        let upload = share.put("files/0", body);
+        active_shares.push(share);
         let app = app.clone();
         uploads.spawn(async move { send(&app, upload).await });
         ready.await.unwrap();
     }
+    send(
+        &app,
+        active_shares[0].put("manifest", Body::from("same share")),
+    )
+    .await
+    .assert_error(StatusCode::CONFLICT, "conflict");
     let denied = send(&app, pending.put("manifest", Body::from("ninth upload"))).await;
     denied.assert_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
     assert_eq!(denied.headers[header::RETRY_AFTER], "5");
@@ -1267,6 +1276,54 @@ async fn download_requires_a_valid_grant_and_masks_unavailable_shares() {
 }
 
 #[tokio::test]
+async fn granted_download_accepts_only_chunk_aligned_ranges() {
+    use tightlip_core::stream::{CHUNK_CIPHERTEXT_LEN, CHUNK_LEN, HEADER_LEN};
+
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let pending = Pending::create(&app, None, 1, 3600).await;
+    let value = vec![5; CHUNK_LEN * 2];
+    let contents = pending.upload(&app, &[&value]).await;
+    pending.commit(&app).await;
+    let opened = pending.reveal(&app).await;
+    let grant = opened["grant"].as_str().unwrap();
+    let get = |range: String| {
+        let mut request = download_request(&pending.path, 0, grant);
+        request
+            .headers_mut()
+            .insert(header::RANGE, range.parse().unwrap());
+        request
+    };
+    let offset = HEADER_LEN + CHUNK_CIPHERTEXT_LEN;
+    let end = contents[0].len() - 1;
+    let suffix = send(&app, get(format!("bytes={offset}-"))).await;
+    assert_eq!(suffix.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(suffix.headers[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(
+        suffix.headers[header::CONTENT_RANGE],
+        format!("bytes {offset}-{end}/{}", end + 1)
+    );
+    assert_eq!(suffix.body.as_ref(), &contents[0][offset..]);
+    let prefix = send(&app, get(format!("bytes=0-{}", offset - 1))).await;
+    assert_eq!(prefix.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(prefix.body.as_ref(), &contents[0][..offset]);
+    for invalid in [
+        "bytes=52-",
+        "bytes=0-51",
+        "bytes=-32",
+        "bytes=0-100,150-200",
+    ] {
+        send(&app, get(invalid.into()))
+            .await
+            .assert_error(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    fixture.advance(600);
+    send(&app, get(format!("bytes={offset}-")))
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+}
+
+#[tokio::test]
 async fn internal_errors_use_the_same_json_shape() {
     let fixture = Fixture::new(Limits::default());
     let app = fixture.server.router();
@@ -1344,7 +1401,7 @@ fn assert_security_headers(response: &Received) {
     let spec = include_str!("../../../docs/SPEC.md");
     let (_, section) = spec.split_once("## 8. Web delivery").unwrap();
     let block = section.split("```").nth(1).unwrap();
-    assert_eq!(block.trim().lines().count(), 8);
+    assert_eq!(block.trim().lines().count(), 9);
     for line in block.trim().lines() {
         let (name, value) = line.split_once(": ").unwrap();
         assert_eq!(response.headers[name], value);
@@ -1456,6 +1513,44 @@ async fn static_routes_serve_the_index_and_immutable_assets() {
         );
         assert_security_headers(&response);
     }
+}
+
+#[tokio::test]
+async fn well_known_security_and_release_routes() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let get = |path: &str| request(Method::GET, path, None, None, Body::empty());
+    let security = send(&app, get("/.well-known/security.txt")).await;
+    assert_eq!(security.status, StatusCode::OK);
+    assert_eq!(
+        security.headers[header::CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(
+        security.headers["integrity-policy"],
+        "blocked-destinations=(script)"
+    );
+    assert!(
+        !security.headers["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("media-src")
+    );
+    assert_eq!(
+        security.body.as_ref(),
+        b"Contact: mailto:security@kurolabs.in\nExpires: 2027-11-22T00:00:00Z\n"
+    );
+
+    let release = send(&app, get("/.well-known/tightlip-release.json")).await;
+    assert_eq!(release.status, StatusCode::NOT_FOUND);
+    let web = fixture.dir.path().join("web");
+    fs::create_dir(&web).unwrap();
+    fs::write(web.join("release.json"), b"{}").unwrap();
+    let release = send(&app, get("/.well-known/tightlip-release.json")).await;
+    assert_eq!(release.status, StatusCode::OK);
+    assert_eq!(release.headers[header::CACHE_CONTROL], "no-cache");
+    assert_eq!(release.headers[header::CONTENT_TYPE], "application/json");
+    assert_eq!(release.body.as_ref(), b"{}");
 }
 
 #[tokio::test]

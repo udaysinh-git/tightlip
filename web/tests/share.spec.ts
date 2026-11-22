@@ -73,6 +73,48 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(page.viewportSize()?.width);
 }
 
+test("production secret fields disable spellcheck before and after showing a password", async ({ page }) => {
+  async function off(selector: string) {
+    const field = page.locator(selector);
+    await expect(field).toHaveAttribute("spellcheck", "false");
+    expect(await field.evaluate((element: HTMLInputElement | HTMLTextAreaElement) => element.spellcheck)).toBe(false);
+  }
+
+  await page.goto("/");
+  await off("#share-text");
+  await page.getByRole("tab", { name: "Login" }).click();
+  for (const name of ["title", "username", "password", "url", "totp", "note"]) {
+    await off(`#login-${name}`);
+  }
+  await page.getByRole("button", { name: "Show password" }).click();
+  await expect(page.locator("#login-password")).toHaveAttribute("type", "text");
+  await off("#login-password");
+
+  await page.locator("#login-title").fill("Synthetic login");
+  await page.getByRole("button", { name: "Add a password" }).click();
+  await off("#share-password");
+  await page.getByRole("button", { name: "Show share password" }).click();
+  await expect(page.locator("#share-password")).toHaveAttribute("type", "text");
+  await off("#share-password");
+  await page.getByRole("button", { name: "Generate share password" }).click();
+  await expect(page.locator("#share-password")).toHaveValue(/^[A-Za-z0-9_-]{43}$/);
+  const link = await createLink(page);
+  await off("#created-link");
+  await page.getByRole("button", { name: "Send the key separately" }).click();
+  const key = page.locator('input[aria-label="Share key"]');
+  await expect(key).toHaveValue(link.hash.slice(1));
+  await off('input[aria-label="Share key"]');
+  await expect(page.locator("#created-link")).not.toHaveValue(/#/);
+  const separate = new URL((await page.locator("#created-link").inputValue()).replace(/^https:/, "http:"));
+
+  await page.goto(separate.href);
+  await off("#reveal-key");
+  await page.locator("#reveal-key").fill(link.hash.slice(1));
+  await page.getByRole("button", { name: "Use key" }).click();
+  await off("#reveal-password");
+  expect(page.url()).toBe(separate.href);
+});
+
 test("the desk and its controls fit the requested widths", async ({ page }) => {
   for (const width of [320, 390, 768, 1280]) {
     await page.setViewportSize({ width, height: 800 });
@@ -212,6 +254,7 @@ test("an image loses its metadata and a multichunk file downloads intact after t
     { name: "sample.bin", mimeType: "application/octet-stream", buffer: file },
   ]);
   await expect(page.locator(".thumbnail")).toBeVisible();
+  await expect(page.getByText("Metadata kept", { exact: false })).toHaveCount(1);
   const link = await createLink(page);
   const context = await browser.newContext();
   try {
@@ -219,6 +262,7 @@ test("an image loses its metadata and a multichunk file downloads intact after t
     const recipient = await context.newPage();
     await openLink(recipient, link);
     await recipient.getByRole("button", { name: "Break the seal" }).click();
+    await expect(recipient.getByText(/server keeps the files for up to 10 minutes/)).toBeVisible();
     const rendered = recipient.getByRole("img", { name: "pixel.png" });
     await expect(rendered).toHaveAttribute("src", /^blob:/);
     await expect.poll(() => rendered.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);

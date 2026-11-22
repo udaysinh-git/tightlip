@@ -6,7 +6,8 @@ import {
   ApiError, NetworkError, commitShare, createShare, deleteShare, downloadFile, evaluate, getMetadata,
   openShare, retryNetwork, unavailable, uploadFile, uploadManifest,
 } from "./api";
-import { scrubType, supportedImage } from "./image-types";
+import { revealAttachment, safeFileName } from "./attachments";
+import { scrubType } from "./image-types";
 import { limits, shareId } from "./wire";
 import type {
   Content, CreateInput, Created, Progress, Reply, Request, Result, Revealed, VisibleFile,
@@ -17,6 +18,19 @@ const sliceSize = 64 * 1024;
 let ready: ReturnType<typeof init> | undefined;
 let owned: { id: string; token: OwnerToken } | undefined;
 let recipient: { id: string; secret: LinkSecret; hasPassword: boolean; expiresAt: number } | undefined;
+
+declare const __TIGHTLIP_WASM_INTEGRITY__: string;
+
+async function loadWasm() {
+  if (import.meta.env.DEV) return init();
+  const url = new URL("../pkg/client/tightlip_bg.wasm", import.meta.url);
+  const response = await fetch(url, { integrity: __TIGHTLIP_WASM_INTEGRITY__, redirect: "error" });
+  if (!response.ok || response.headers.get("Content-Type") !== "application/wasm") {
+    throw new Error("Could not load the encryption module.");
+  }
+  // wasm-bindgen passes the verified Response to WebAssembly.instantiateStreaming.
+  return init({ module_or_path: response });
+}
 
 class UsedViewError extends Error {}
 class WrongPasswordError extends Error {
@@ -29,7 +43,7 @@ class WrongPasswordError extends Error {
 async function sealFile(session: ShareSession, draft: Draft, file: File): Promise<Blob> {
   let source: Blob = file;
   let orientation: number | undefined;
-  const mime = scrubType(file.type, new Uint8Array(await file.slice(0, 8).arrayBuffer()));
+  const mime = scrubType(new Uint8Array(await file.slice(0, 12).arrayBuffer()));
   if (mime) {
     const original = new Uint8Array(await file.arrayBuffer());
     try {
@@ -138,49 +152,118 @@ async function create(input: CreateInput, progress: (value: Progress) => void): 
   }
 }
 
-async function fetchFile(
-  id: string, grant: string, entry: VisibleFile, n: number, expected: number, manifest: OpenedManifest,
-): Promise<Blob> {
-  const header = new Uint8Array(file_header_length());
-  let headerBytes = 0;
-  let received = 0;
-  let opened: ReturnType<OpenedManifest["decrypt_file_init"]> | undefined;
-  const reader = (await downloadFile(id, n, grant)).getReader();
-  const parts: Blob[] = [];
-  function append(bytes: Uint8Array<ArrayBuffer>) {
-    if (bytes.length) parts.push(new Blob([bytes]));
+class Download {
+  readonly #header = new Uint8Array(file_header_length());
+  readonly #chunk = new Uint8Array(sliceSize + 16);
+  readonly #parts: Blob[] = [];
+  #offset = 0;
+  #opened: ReturnType<OpenedManifest["decrypt_file_init"]> | undefined;
+
+  constructor(readonly n: number, readonly size: number, readonly entry: VisibleFile) {}
+
+  free() {
+    this.#opened?.free();
+    this.#opened = undefined;
+    this.#parts.length = 0;
+  }
+
+  #append(bytes: Uint8Array<ArrayBuffer>) {
+    if (bytes.length) this.#parts.push(new Blob([bytes]));
     bytes.fill(0);
   }
-  const read = () => reader.read().catch(() => { throw new NetworkError(); });
-  try {
-    for (let streamed = await read(); !streamed.done; streamed = await read()) {
-      let bytes = streamed.value;
-      received += bytes.length;
-      if (received > expected) throw new Error("Could not decrypt the share.");
-      if (!opened) {
-        const take = Math.min(bytes.length, header.length - headerBytes);
-        header.set(bytes.subarray(0, take), headerBytes);
-        headerBytes += take;
-        if (headerBytes < header.length) continue;
-        opened = manifest.decrypt_file_init(n, header);
-        bytes = bytes.subarray(take);
+
+  async read(id: string, grant: string, deadline: number, manifest: OpenedManifest) {
+    if (Date.now() >= deadline) throw new NetworkError();
+    const signal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+    const reader = (await downloadFile(id, this.n, grant, this.#offset, this.size, signal)).getReader();
+    // A failed request discards the partial block and resumes at #offset.
+    let buffered = 0;
+    try {
+      while (this.#offset < this.size) {
+        const item = await reader.read().catch(() => { throw new NetworkError(); });
+        if (item.done) throw new NetworkError();
+        let bytes = item.value;
+        while (bytes.length) {
+          if (this.#offset >= this.size) throw new Error("Could not decrypt the share.");
+          const block = this.#opened ? this.#chunk : this.#header;
+          const required = Math.min(block.length, this.size - this.#offset);
+          const take = Math.min(required - buffered, bytes.length);
+          block.set(bytes.subarray(0, take), buffered);
+          buffered += take;
+          bytes = bytes.subarray(take);
+          if (buffered !== required) continue;
+          if (this.#opened) this.#append(this.#opened.update(block.subarray(0, required)));
+          else this.#opened = manifest.decrypt_file_init(this.n, this.#header);
+          this.#offset += required;
+          buffered = 0;
+        }
       }
-      for (let offset = 0; offset < bytes.length; offset += sliceSize) {
-        append(opened.update(bytes.subarray(offset, offset + sliceSize)));
-      }
+      const opened = this.#opened;
+      if (!opened) throw new Error("Could not decrypt the share.");
+      this.#opened = undefined;
+      this.#append(opened.finish());
+      return await revealAttachment(this.entry, this.#parts);
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
-    if (received !== expected) throw new NetworkError();
-    if (!opened) throw new Error("Could not decrypt the share.");
-    const final = opened;
-    opened = undefined;
-    append(final.finish());
-    return new Blob(parts, { type: supportedImage(entry.mime) ? entry.mime : "application/octet-stream" });
-  } finally {
-    opened?.free();
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
   }
 }
+
+class Downloads {
+  readonly #done = new Map<number, Revealed["files"][number]>();
+  readonly #failed: string[] = [];
+  #timer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor(readonly id: string, readonly grant: string, readonly deadline: number,
+    readonly manifest: OpenedManifest, readonly pending: Download[]) {}
+
+  free() {
+    clearTimeout(this.#timer);
+    for (const job of this.pending) job.free();
+    this.manifest.free();
+  }
+
+  async read(): Promise<Pick<Revealed, "files" | "failedFiles" | "retryUntil">> {
+    clearTimeout(this.#timer);
+    const next: Download[] = [];
+    for (const job of this.pending) {
+      try {
+        const file = await retryNetwork(
+          () => job.read(this.id, this.grant, this.deadline, this.manifest), this.deadline,
+        );
+        this.#done.set(job.n, file);
+        job.free();
+      } catch (error) {
+        if (error instanceof NetworkError && Date.now() < this.deadline) next.push(job);
+        else {
+          this.#failed.push(safeFileName(job.entry.name));
+          job.free();
+        }
+      }
+    }
+    this.pending.splice(0, this.pending.length, ...next);
+    const retryUntil = next.length && Date.now() < this.deadline ? this.deadline : undefined;
+    const result = {
+      files: [...this.#done.entries()].sort(([a], [b]) => a - b).map(([, file]) => file),
+      failedFiles: [...this.#failed, ...next.map((job) => safeFileName(job.entry.name))],
+      retryUntil,
+    };
+    if (retryUntil) {
+      pendingDownloads = this;
+      this.#timer = setTimeout(() => {
+        if (pendingDownloads === this) pendingDownloads = undefined;
+        this.free();
+      }, retryUntil - Date.now());
+    } else {
+      if (pendingDownloads === this) pendingDownloads = undefined;
+      this.free();
+    }
+    return result;
+  }
+}
+
+let pendingDownloads: Downloads | undefined;
 
 async function reveal(password: string | undefined): Promise<Revealed> {
   if (!recipient) throw new Error(unavailable);
@@ -206,24 +289,21 @@ async function reveal(password: string | undefined): Promise<Revealed> {
         }
       });
       const opened = session.open_manifest(manifest, files.length);
+      let content: Content & { files: VisibleFile[] };
+      let jobs: Download[];
       try {
-        const content = JSON.parse(opened.visible_content()) as Content & { files: VisibleFile[] };
-        const decrypted: Revealed["files"] = [];
-        const failedFiles: string[] = [];
-        for (const { n, size } of files) {
+        content = JSON.parse(opened.visible_content()) as Content & { files: VisibleFile[] };
+        jobs = files.map(({ n, size }) => {
           const entry = content.files[n];
           if (!entry) throw new Error("Could not decrypt the share.");
-          try {
-            const blob = await retryNetwork(() => fetchFile(id, grant, entry, n, size, opened), grantDeadline);
-            decrypted.push({ ...entry, blob });
-          } catch {
-            failedFiles.push(entry.name);
-          }
-        }
-        return { note: content.note, login: content.login, files: decrypted, failedFiles, viewsLeft };
-      } finally {
+          return new Download(n, size, entry);
+        });
+      } catch (error) {
         opened.free();
+        throw error;
       }
+      const downloads = new Downloads(id, grant, grantDeadline, opened, jobs);
+      return { note: content.note, login: content.login, viewsLeft, ...await downloads.read() };
     } catch (error) {
       if (!usedView) {
         if (hasPassword && error instanceof ApiError && error.code === "unauthorized") {
@@ -261,7 +341,7 @@ scope.onmessage = async ({ data }: MessageEvent<Request>) => {
   }
   processing = true;
   try {
-    await (ready ??= init());
+    await (ready ??= loadWasm());
     let result: Result;
     switch (operation) {
       case "create":
@@ -304,6 +384,10 @@ scope.onmessage = async ({ data }: MessageEvent<Request>) => {
       }
       case "reveal":
         result = await reveal(input.password);
+        break;
+      case "retryDownload":
+        if (!pendingDownloads) throw new Error("The download window has ended.");
+        result = await pendingDownloads.read();
         break;
     }
     reply({ id, result });

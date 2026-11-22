@@ -1,5 +1,5 @@
 export default function init(options?: {
-  module_or_path: BufferSource | URL | string | WebAssembly.Module;
+  module_or_path: Response | BufferSource | URL | string | WebAssembly.Module;
 }): Promise<unknown>;
 
 interface Handle {

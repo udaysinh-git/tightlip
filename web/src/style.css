@@ -280,7 +280,7 @@ svg { flex: none; }
 .share-password {
   position: relative;
   display: inline-block;
-  inline-size: min(100%, 170px);
+  inline-size: min(100%, 240px);
   vertical-align: baseline;
 }
 .share-password input, .reveal-password input {
@@ -431,7 +431,8 @@ svg { flex: none; }
 .file-row { display: flex; align-items: center; gap: 8px; min-block-size: 40px; }
 .file-info { min-inline-size: 0; overflow-wrap: anywhere; font-size: 13px; }
 .picked-file .file-info { padding-block-start: 4px; }
-.file-info span, .file-info small { display: block; }
+.file-info > bdi, .file-info small { display: block; }
+.file-extension { color: var(--secondary); unicode-bidi: isolate; }
 .file-info small { color: var(--secondary); font-size: 13px; }
 .file-row .file-info { flex: 1; }
 
@@ -442,7 +443,11 @@ svg { flex: none; }
   gap: 13px 18px;
   min-block-size: 120px;
 }
-.result-paper { block-size: 120px; }
+.sealed-credentials { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.sealed-credentials > .sealed-link:last-child:not(:first-child) { grid-column: 1 / -1; }
+.split-key[aria-pressed="true"] { color: var(--seal); }
+.quiet-paper.share-key-form { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; }
+.share-key-form .reveal-password { grid-column: 1; inline-size: 100%; }
 .folded-paper:not(.quiet-paper)::before {
   content: "";
   position: absolute;

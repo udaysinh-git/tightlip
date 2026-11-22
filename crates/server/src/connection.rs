@@ -1,14 +1,19 @@
 use std::{
+    future::Future,
     io,
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
-use axum::{
-    extract::connect_info::Connected,
-    serve::{IncomingStream, Listener},
+use axum::{Extension, Router, extract::ConnectInfo, serve::Listener};
+use hyper::server::conn::http1;
+use hyper_util::{
+    rt::{TokioIo, TokioTimer},
+    server::graceful::GracefulShutdown,
+    service::TowerToHyperService,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -59,10 +64,39 @@ impl Listener for CappedListener {
 #[derive(Clone, Copy)]
 pub(crate) struct Peer(pub SocketAddr);
 
-impl Connected<IncomingStream<'_, CappedListener>> for Peer {
-    fn connect_info(stream: IncomingStream<'_, CappedListener>) -> Self {
-        Self(*stream.remote_addr())
+fn http1_builder() -> http1::Builder {
+    let mut builder = http1::Builder::new();
+    // Hyper starts this timer again when waiting for the next keep-alive request.
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(10));
+    builder
+}
+
+pub(crate) async fn serve(
+    listener: TcpListener,
+    router: Router,
+    shutdown: impl Future<Output = ()>,
+) -> io::Result<()> {
+    let mut listener = CappedListener::new(listener);
+    let graceful = GracefulShutdown::new();
+    let builder = http1_builder();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            biased;
+            () = &mut shutdown => break,
+            (stream, peer) = listener.accept() => {
+                let service = router.clone().layer(Extension(ConnectInfo(Peer(peer))));
+                let connection = builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
+                let connection = graceful.watch(connection);
+                tokio::spawn(async move { let _ = connection.await; });
+            }
+        }
     }
+    drop(listener);
+    graceful.shutdown().await;
+    Ok(())
 }
 
 pub(crate) struct Connection {
@@ -101,6 +135,48 @@ impl AsyncWrite for Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn incomplete_first_and_keep_alive_headers_expire_after_ten_seconds() {
+        use axum::{http::StatusCode, routing::get};
+        use tokio::{
+            io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex},
+            time::{Instant, timeout},
+        };
+
+        let router = Router::new().route("/", get(|| async { StatusCode::NO_CONTENT }));
+        for keep_alive in [false, true] {
+            let (socket, client) = duplex(2048);
+            let mut client = BufReader::new(client);
+            let connection = http1_builder().serve_connection(
+                TokioIo::new(socket),
+                TowerToHyperService::new(router.clone()),
+            );
+            let serving = tokio::spawn(connection);
+            if keep_alive {
+                client
+                    .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                client.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "HTTP/1.1 204 No Content\r\n");
+                while line != "\r\n" {
+                    line.clear();
+                    assert_ne!(client.read_line(&mut line).await.unwrap(), 0);
+                }
+            }
+            let start = Instant::now();
+            client.write_all(b"GET / HTTP/1.1\r\nHost: ").await.unwrap();
+            let error = timeout(Duration::from_secs(11), serving)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(error.is_timeout());
+            assert_eq!(start.elapsed(), Duration::from_secs(10));
+        }
+    }
 
     #[tokio::test]
     async fn a_connection_holds_its_slot_until_dropped() {

@@ -25,6 +25,7 @@ export function delivery(): Plugin {
         let scripts = 0;
         let styles = 0;
         index.source = index.source.replace(/<(script|link)\b([^>]*?)>/g, (_, tag: string, attrs: string) => {
+          if (tag === "script" && /\btype="application\/ld\+json"/.test(attrs)) return `<${tag}${attrs}>`;
           if (tag === "link" && !/\brel="(?:stylesheet|modulepreload)"/.test(attrs)) return `<${tag}${attrs}>`;
           const url = /\b(?:src|href)="\/([^"]+)"/.exec(attrs)?.[1];
           const integrity = url && hashes[url];
@@ -36,10 +37,10 @@ export function delivery(): Plugin {
         if (scripts !== 1 || styles !== 1 || /<style\b/.test(index.source)) {
           this.error("Expected one external entry script and one external stylesheet.");
         }
-        hashes["index.html"] = sha384(index.source);
-        this.emitFile({
-          type: "asset", name: "hashes.json", source: `${JSON.stringify(hashes, null, 2)}\n`,
-        });
+        const entries = Object.values(bundle).filter((file) => file.type === "chunk");
+        if (entries.length !== 1 || entries.some((file) => file.imports.length || file.dynamicImports.length)) {
+          this.error("The page script must be a single self-contained module with integrity metadata.");
+        }
       },
     },
   };

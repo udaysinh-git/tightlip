@@ -1,11 +1,13 @@
 // Adapted from Bencho "Upload dropzone" (bencho.dev), used under the Bencho Pro licence.
 import { For, createSignal } from "solid-js";
+import { safeFileName } from "./attachments";
 import { Icon } from "./icons";
-import { IconButton, fileSize } from "./ui";
+import { FileName, IconButton, fileSize } from "./ui";
 
 export interface PickedFile {
   file: File;
   thumbnail?: string;
+  metadataKept: boolean;
 }
 
 export function UploadDropzone(props: {
@@ -65,13 +67,13 @@ export function UploadDropzone(props: {
           <li class="picked-file">
             <div class="file-preview">
               {item.thumbnail ? <img class="thumbnail" src={item.thumbnail} alt="" /> : <Icon name="files" />}
-              <IconButton icon="remove" label={`Remove ${item.file.name}`} onClick={(event) => {
+              <IconButton icon="remove" label={`Remove ${safeFileName(item.file.name)}`} onClick={(event) => {
                 const pointer = event.detail > 0;
                 if (!pointer) choose?.focus();
                 props.remove(item, pointer);
               }} />
             </div>
-            <div class="file-info"><span>{item.file.name}</span><small>{fileSize(item.file.size)}</small></div>
+            <div class="file-info"><FileName name={item.file.name} /><small>{fileSize(item.file.size)}{item.metadataKept ? " • Metadata kept" : ""}</small></div>
           </li>
         )}</For>
       </ul>

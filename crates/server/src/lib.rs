@@ -10,10 +10,11 @@ mod storage;
 mod web;
 
 use std::{
+    collections::HashSet,
     future::Future,
     io,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -26,7 +27,7 @@ use tightlip_core::{
 };
 use tokio::sync::Semaphore;
 
-use config::{Config, Limits};
+use config::{Config, Limits, valid_kek};
 use connection::Peer;
 use rate::RateLimiter;
 use storage::{Blobs, Error, Metadata, Result, disk::Disk, sqlite::Sqlite};
@@ -69,6 +70,7 @@ struct State {
     limits: Limits,
     rate: RateLimiter,
     uploads: Arc<Semaphore>,
+    uploading: Arc<Mutex<HashSet<ShareId>>>,
     web_dir: PathBuf,
 }
 
@@ -80,6 +82,9 @@ struct Dummy {
 
 impl Server {
     pub fn open(config: Config, clock: Arc<dyn Clock>) -> std::result::Result<Self, ServerError> {
+        if !valid_kek(&config.kek) {
+            return Err(ServerError::Crypto);
+        }
         let dummy = Dummy::new(&config.kek).map_err(|_| ServerError::Crypto)?;
         let blobs = Disk::open(&config.data_dir).map_err(|_| ServerError::Storage)?;
         let meta = Sqlite::open(&config.data_dir.join("tightlip.sqlite3"))
@@ -100,6 +105,7 @@ impl Server {
             limits: config.limits,
             rate: RateLimiter::new(config.limits.creates_per_ip),
             uploads: Arc::new(Semaphore::new(8)),
+            uploading: Arc::default(),
             web_dir: config.web_dir,
         })))
     }
@@ -113,12 +119,7 @@ impl Server {
         listener: tokio::net::TcpListener,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> io::Result<()> {
-        axum::serve(
-            connection::CappedListener::new(listener),
-            self.router().into_make_service_with_connect_info::<Peer>(),
-        )
-        .with_graceful_shutdown(shutdown)
-        .await
+        connection::serve(listener, self.router(), shutdown).await
     }
 
     pub async fn sweep(&self) -> std::result::Result<(), ServerError> {

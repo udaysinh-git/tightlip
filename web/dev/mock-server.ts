@@ -310,8 +310,20 @@ export async function createMockServer(moduleUrl: URL) {
       if (!valid) fail(share.key ? "unauthorized" : "not_found");
       const file = share.files[n];
       if (!file) fail("not_found");
-      response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": file.length });
-      response.end(file);
+      const range = request.headers.range;
+      const match = range && /^bytes=(\d+)-(\d*)$/.exec(range);
+      const start = match ? Number(match[1]) : 0;
+      const end = match?.[2] ? Number(match[2]) + 1 : file.length;
+      const boundary = (offset: number) => offset >= 51 && (offset - 51) % 65552 === 0;
+      if (range && (!match || start >= end || end > file.length || (start !== 0 && !boundary(start))
+        || (end !== file.length && (end === 51 || !boundary(end))))) fail("bad_request");
+      response.writeHead(range ? 206 : 200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": end - start,
+        "Accept-Ranges": "bytes",
+        ...(range ? { "Content-Range": `bytes ${start}-${end - 1}/${file.length}` } : {}),
+      });
+      response.end(file.subarray(start, end));
       return;
     }
     fail("not_found");

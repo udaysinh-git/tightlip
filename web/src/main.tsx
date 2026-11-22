@@ -12,12 +12,21 @@ import { IconButton } from "./ui";
 import "./style.css";
 import "./motion.css";
 
+// The security page used to live at /#security. Move old links to its own path.
+if (location.pathname === "/" && location.hash === "#security") history.replaceState(null, "", "/security");
 const path = location.pathname;
-const home = path === "/";
-const securityHash = "#security";
-const onSecurity = () => home && location.hash === securityHash;
+// Home and the security page are views of one screen, so a half-written note survives a visit.
+const home = path === "/" || path === "/security";
+const securityPath = "/security";
+const onSecurity = () => location.pathname === securityPath;
+const titles = {
+  note: "Tightlip: send a password or file that burns after reading",
+  security: "How Tightlip keeps a secret: encryption, burn and limits",
+  share: "A sealed note for you · Tightlip",
+};
+document.title = onSecurity() ? titles.security : home ? titles.note : titles.share;
 
-// On a share page the fragment is the key: take it and clear the address at once.
+// Read the share key and replace the URL shown in the address bar.
 // On the home page the only fragment with a meaning is the security page.
 let fragment = "";
 if (!onSecurity() && (location.hash || location.href.endsWith("#"))) {
@@ -40,7 +49,10 @@ function App() {
   onCleanup(trackInput());
   onCleanup(() => client.close());
 
-  const sync = () => setSecurity(onSecurity());
+  const sync = () => {
+    setSecurity(onSecurity());
+    if (home) document.title = onSecurity() ? titles.security : titles.note;
+  };
   window.addEventListener("popstate", sync);
   window.addEventListener("hashchange", sync);
   onCleanup(() => {
@@ -53,7 +65,8 @@ function App() {
     if (!home || event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
     event.preventDefault();
     if (open === security()) return;
-    history.pushState(null, "", open ? `/${securityHash}` : "/");
+    history.pushState(null, "", open ? securityPath : "/");
+    document.title = open ? titles.security : titles.note;
     void changeView("compose", () => setSecurity(open), event.detail > 0).then(() => {
       window.scrollTo({ top: 0 });
       if (event.detail === 0) document.getElementById(open ? "security-title" : "share-text")?.focus();
@@ -65,7 +78,7 @@ function App() {
       <header>
         <a class="logo" href="/" aria-label="tightlip, write a secret" onClick={(event) => show(false, event)}><Logo /></a>
         <nav aria-label="Site">
-          <a class="icon-button" href={`/${securityHash}`} target={home ? undefined : "_blank"}
+          <a class="icon-button" href={securityPath} target={home ? undefined : "_blank"}
             rel={home ? undefined : "noopener"} title="How Tightlip protects a secret" aria-label="Security"
             aria-current={security() ? "page" : undefined} onClick={(event) => show(true, event)}>
             <Icon name="shield" />
@@ -82,7 +95,7 @@ function App() {
           </Show>
         </main>
         <footer>
-          <span>End-to-end encrypted. The server never sees the secret.</span>
+          <span>Your browser encrypts shares before upload.</span>
           <div class="footer-actions">
             <IconButton icon={sound() ? "sound" : "mute"} label={sound() ? "Turn sounds off" : "Turn sounds on"}
               pressed={sound()} onClick={() => {

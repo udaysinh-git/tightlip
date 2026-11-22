@@ -9,6 +9,7 @@ type VectorSet = (&'static str, fn() -> Value);
 
 const VECTOR_SETS: &[VectorSet] = &[
     ("kdf", kdf_vectors),
+    ("eval_auth", eval_auth_vector),
     ("seal", seal_vectors),
     ("stream_seal", stream_vectors),
     ("padme", padme_vectors),
@@ -43,6 +44,30 @@ fn write_known_answer_vectors() {
 #[test]
 fn kdf_known_answers() {
     assert_eq!(load("kdf"), kdf_vectors());
+}
+
+#[test]
+fn eval_auth_known_answer() {
+    assert_eq!(load("eval_auth"), eval_auth_vector());
+    let secret = Secret32::from_bytes(bytes::<32>(0));
+    let first = share::eval_tag(&secret, &bytes::<16>(32)).unwrap();
+    let second = share::eval_tag(&secret, &bytes::<16>(33)).unwrap();
+    let expected = share::eval_verifier(&first);
+    assert!(share::verify_eval(&first, &expected));
+    assert!(!share::verify_eval(&second, &expected));
+}
+
+fn eval_auth_vector() -> Value {
+    let link_secret = Secret32::from_bytes(bytes::<32>(0));
+    let share_id = bytes::<16>(32);
+    let tag = share::eval_tag(&link_secret, &share_id).unwrap();
+    json!({
+        "suite": labels::SUITE,
+        "link_secret": b64::encode(link_secret.as_bytes()),
+        "share_id": b64::encode(&share_id),
+        "eval_tag": b64::encode(tag.as_bytes()),
+        "eval_verifier": b64::encode(&share::eval_verifier(&tag)),
+    })
 }
 
 #[test]

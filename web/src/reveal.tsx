@@ -5,7 +5,6 @@ import { CopyButton } from "./copy-field";
 import { createFeedback, Feedback } from "./feedback";
 import { passwordError } from "./form-error";
 import { Icon } from "./icons";
-import { supportedImage } from "./image-types";
 import { MaskedSecret } from "./masked-secret";
 import { RollingCounter } from "./rolling-counter";
 import { Seal, SealGlyph } from "./seal";
@@ -13,7 +12,7 @@ import { viewLabel } from "./sentence-choice";
 import { playSound } from "./share-sounds";
 import { DecodedImage, TextReveal } from "./text-reveal";
 import { changeView, finishViewTransition, motionAllowed, paperDust } from "./transitions";
-import { Expiry, IconButton, fileSize, message } from "./ui";
+import { Expiry, FileName, IconButton, fileSize, message } from "./ui";
 import { WorkerError } from "./worker-client";
 import type { CryptoClient } from "./worker-client";
 import { loginFields } from "./worker-protocol";
@@ -40,16 +39,21 @@ function LoginValue(props: {
 }
 
 function RevealedAttachment(props: { file: RevealedFile; animate: boolean }) {
-  const url = URL.createObjectURL(props.file.blob);
-  onCleanup(() => URL.revokeObjectURL(url));
+  const download = URL.createObjectURL(props.file.download);
+  const preview = props.file.preview && URL.createObjectURL(props.file.preview);
+  onCleanup(() => {
+    URL.revokeObjectURL(download);
+    if (preview) URL.revokeObjectURL(preview);
+  });
   return (
     <li class="attachment">
-      <Show when={supportedImage(props.file.mime)}>
+      <Show when={preview} keyed>{(url) =>
         <DecodedImage src={url} name={props.file.name} orientation={props.file.orientation} animate={props.animate} />
-      </Show>
+      }</Show>
       <div class="file-row">
-        <div class="file-info"><span>{props.file.name}</span><small>{fileSize(props.file.size)}</small></div>
-        <a class="icon-button" href={url} download={props.file.name}
+        <div class="file-info"><FileName name={props.file.name} />
+          <small>{fileSize(props.file.size)}</small></div>
+        <a class="icon-button" href={download} download={props.file.name}
           title={`Download ${props.file.name}`} aria-label={`Download ${props.file.name}`}>
           <Icon name="download" />
         </a>
@@ -61,6 +65,15 @@ function RevealedAttachment(props: { file: RevealedFile; animate: boolean }) {
 export function Reveal(props: { client: CryptoClient; path: string; takeFragment: () => string }) {
   const [metadata, setMetadata] = createSignal<Metadata>();
   const [opened, setOpened] = createSignal<Revealed>();
+  const [canRetry, setCanRetry] = createSignal(false);
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function showDownloads(content: Revealed) {
+    setOpened(content);
+    clearTimeout(retryTimer);
+    setCanRetry(content.retryUntil !== undefined && content.retryUntil > Date.now());
+    if (content.retryUntil) retryTimer = setTimeout(() => setCanRetry(false), content.retryUntil - Date.now());
+  }
   const [password, setPassword] = createSignal("");
   const [loading, setLoading] = createSignal(true);
   const [busy, setBusy] = createSignal(false);
@@ -70,6 +83,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
   const [unread, setUnread] = createSignal(false);
   const [priorCount, setPriorCount] = createSignal(0);
   const [keyless, setKeyless] = createSignal(false);
+  const [linkKey, setLinkKey] = createSignal("");
   const feedback = createFeedback();
   let field: HTMLInputElement | undefined;
   let seal: HTMLSpanElement | undefined;
@@ -82,6 +96,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
 
   function leave() {
     departed = true;
+    clearTimeout(retryTimer);
     stopDust?.();
     finishViewTransition();
     props.client.close();
@@ -89,6 +104,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
       setOpened(undefined);
       setMetadata(undefined);
       setPassword("");
+      setLinkKey("");
       setGone(true);
       setLoading(false);
       feedback.notify("");
@@ -98,22 +114,47 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
   window.addEventListener("pagehide", leave);
   onCleanup(() => {
     departed = true;
+    clearTimeout(retryTimer);
     stopDust?.();
     window.removeEventListener("pagehide", leave);
   });
 
-  // The key lives only in the address fragment, which is removed on arrival. A reload has none.
-  const fragment = props.takeFragment();
-  if (!fragment) {
-    setKeyless(true);
-    setLoading(false);
-  } else void props.client.call("load", { path: props.path, fragment })
-    .then((share) => { if (!departed) setMetadata(share); }, (cause: unknown) => {
+  async function load(fragment: string, pasted = false) {
+    setLoading(true);
+    feedback.notify("");
+    try {
+      const share = await props.client.call("load", { path: props.path, fragment });
+      if (departed) return;
+      setMetadata(share);
+      setKeyless(false);
+      setLinkKey("");
+    } catch (cause) {
       if (departed) return;
       const problem = message(cause);
-      if (problem === unavailable) setGone(true);
+      if (!pasted && problem === unavailable) setGone(true);
       else feedback.notify(problem, true);
-    }).finally(() => setLoading(false));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const fragment = props.takeFragment();
+  if (fragment) void load(fragment);
+  else {
+    setKeyless(true);
+    setLoading(false);
+  }
+
+  function submitKey(event: SubmitEvent) {
+    event.preventDefault();
+    if (loading()) return;
+    const key = linkKey().trim();
+    if (!/^[A-Za-z0-9_-]{43}$/.test(key)) {
+      feedback.notify("Enter the 43-character share key.", true);
+      return;
+    }
+    void load(key, true);
+  }
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
@@ -141,7 +182,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
       await changeView("reveal", () => {
         setAnimate(motionAllowed(pointer));
         setPriorCount(share.views_left);
-        setOpened(content);
+        showDownloads(content);
         setMetadata(undefined);
         setPassword("");
         setBusy(false);
@@ -170,13 +211,31 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
     }
   }
 
+  async function retryDownload() {
+    const content = opened();
+    if (!content || !canRetry() || busy()) return;
+    setBusy(true);
+    feedback.notify("");
+    try {
+      const files = await props.client.call("retryDownload", undefined);
+      if (!departed && opened() === content) showDownloads({ ...content, ...files });
+    } catch (cause) {
+      if (!departed) feedback.notify(message(cause), true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function closeLastView(event: MouseEvent) {
-    if (closing || opened()?.viewsLeft !== 0 || !panel) return;
+    if (closing || busy() || opened()?.viewsLeft !== 0 || !panel) return;
     closing = true;
     const pointer = event.detail > 0;
     playSound("dissolve");
     stopDust = paperDust(panel, pointer);
     void changeView("burn", () => {
+      props.client.close();
+      clearTimeout(retryTimer);
+      setCanRetry(false);
       setOpened(undefined);
       setGone(true);
       feedback.notify("");
@@ -246,7 +305,10 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
               </Show>
               <Show when={content.failedFiles.length > 0}>
                 <p role="status">A view was used. These files could not be read.</p>
-                <ul><For each={content.failedFiles}>{(name) => <li>{name}</li>}</For></ul>
+                <ul><For each={content.failedFiles}>{(name) => <li><FileName name={name} /></li>}</For></ul>
+                <Show when={canRetry()}>
+                  <IconButton icon="refresh" label="Retry download" disabled={busy()} onClick={() => void retryDownload()} />
+                </Show>
               </Show>
             </TextReveal>
           </div>
@@ -255,9 +317,11 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
               <p class="sentence" role="status"><Show when={content.viewsLeft === 0} fallback={
                 <><RollingCounter count={content.viewsLeft ?? 0} previous={priorCount()} animate={animate()} />
                   {" "}{content.viewsLeft === 1 ? "view" : "views"} left.</>
-              }>This was the last view.</Show></p>
+              }>This was the last view.{content.files.length + content.failedFiles.length > 0
+                ? " The server keeps the files for up to 10 minutes so downloads can finish, then deletes them."
+                : ""}</Show></p>
               <Show when={content.viewsLeft === 0}>
-                <IconButton icon="remove" label="Close share" onClick={closeLastView} />
+                <IconButton icon="remove" label="Close share" disabled={busy()} onClick={closeLastView} />
               </Show>
             </div>
           </Show>
@@ -269,7 +333,17 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
           data-motion-shared="">Nothing here. The link has burned or expired.</p>
       </Show>
       <Show when={keyless()}>
-        <p class="paper folded-paper quiet-paper" role="status">This page no longer holds the key. Open the link you were sent again. Nothing has been used up.</p>
+        <form class="paper folded-paper quiet-paper share-key-form" onSubmit={submitKey}>
+          <label class="reveal-password" for="reveal-key">
+            <span>Share key</span>
+            <input type="password" id="reveal-key" autocomplete="off" spellcheck="false" autocorrect="off"
+              autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false"
+              data-lt-active="false" placeholder="Paste the 43-character key" value={linkKey()}
+              onInput={(event) => setLinkKey(event.currentTarget.value)} required />
+          </label>
+          <button class="primary" type="submit" disabled={loading()}>Use key</button>
+          <Feedback feedback={feedback} />
+        </form>
       </Show>
       <Show when={!metadata() && !opened() && !loading() && !keyless()}>
         <Show when={!gone() && !unread()}><p class="paper folded-paper quiet-paper">Could not check this link.</p></Show>

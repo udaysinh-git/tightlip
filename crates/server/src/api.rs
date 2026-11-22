@@ -1,5 +1,8 @@
 use std::{
+    collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    ops::Range,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -19,6 +22,7 @@ use tightlip_core::{
     Secret32, b64, labels,
     oprf::ServerKey,
     share::{self, ShareId, Verifier},
+    stream::{CHUNK_CIPHERTEXT_LEN, HEADER_LEN},
 };
 use tokio::{
     io::AsyncWriteExt,
@@ -43,13 +47,14 @@ const UPLOAD_TIME: Duration = Duration::from_secs(15 * 60);
 const JSON_TIME: Duration = Duration::from_secs(10);
 const CSP: &str = concat!(
     "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; ",
-    "img-src 'self' blob:; media-src blob:; font-src 'self'; connect-src 'self'; ",
+    "img-src 'self' blob:; font-src 'self'; connect-src 'self'; ",
     "worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; ",
     "frame-ancestors 'none'; require-trusted-types-for 'script'; ",
     "trusted-types tightlip-templates tightlip-worker",
 );
-const SECURITY_HEADERS: [(&str, &str); 8] = [
+const SECURITY_HEADERS: [(&str, &str); 9] = [
     ("content-security-policy", CSP),
+    ("integrity-policy", "blocked-destinations=(script)"),
     ("referrer-policy", "no-referrer"),
     ("x-content-type-options", "nosniff"),
     ("cross-origin-opener-policy", "same-origin"),
@@ -75,8 +80,14 @@ pub(crate) fn router(server: Server) -> Router {
         .route("/api/v1/shares/{id}/eval", post(eval))
         .route("/api/v1/shares/{id}/open", post(open))
         .route("/", get(web::index))
-        .route("/s/{id}", get(web::index))
+        .route("/s/{id}", get(web::share_index))
+        .route("/security", get(web::index))
+        .route("/robots.txt", get(web::robots))
+        .route("/sitemap.xml", get(web::sitemap))
+        .route("/og.png", get(web::og_image))
         .route("/assets/{*path}", get(web::asset))
+        .route("/.well-known/security.txt", get(web::security_txt))
+        .route("/.well-known/tightlip-release.json", get(web::release))
         .route("/healthz", get(|| async { "ok" }))
         .fallback(|| async { Error::Missing })
         .method_not_allowed_fallback(|| async { Error::Missing })
@@ -126,7 +137,7 @@ impl IntoResponse for Error {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Invalid => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
-            Self::FileGap => (StatusCode::CONFLICT, "conflict"),
+            Self::FileGap | Self::UploadInFlight => (StatusCode::CONFLICT, "conflict"),
             Self::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             Self::Internal | Self::Io(_) | Self::Sql(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal")
@@ -239,10 +250,9 @@ async fn manifest(
     ApiPath(id): ApiPath<String>,
     request: Request,
 ) -> Result<StatusCode> {
-    let permit = upload_permit(&server)?;
     let deadline = Deadline::now() + UPLOAD_TIME;
     let target = require_type(request.headers(), BINARY).map(|()| UploadTarget::Manifest);
-    let (upload, cap) = timeout_at(
+    let (upload, cap, slot, permit) = timeout_at(
         deadline,
         prepare_upload(&server, &id, target, request.headers()),
     )
@@ -260,7 +270,7 @@ async fn manifest(
     }
     server
         .run(move |state| {
-            let _permit = permit;
+            let (_permit, _slot) = (permit, slot);
             check_upload_deadline(deadline)?;
             state.meta.put_manifest(&upload, state.clock.now(), &data)
         })
@@ -273,12 +283,11 @@ async fn put_file(
     ApiPath((id, n)): ApiPath<(String, String)>,
     request: Request,
 ) -> Result<StatusCode> {
-    let permit = upload_permit(&server)?;
     let deadline = Deadline::now() + UPLOAD_TIME;
     let target = require_type(request.headers(), BINARY)
         .and_then(|()| file_index(&n))
         .map(UploadTarget::File);
-    let (upload, cap) = timeout_at(
+    let (upload, cap, slot, permit) = timeout_at(
         deadline,
         prepare_upload(&server, &id, target, request.headers()),
     )
@@ -304,19 +313,15 @@ async fn put_file(
         .map_err(|_| Error::Invalid)??;
     server
         .run(move |state| {
-            let _permit = permit;
+            let (_permit, _slot) = (permit, slot);
             check_upload_deadline(deadline)?;
             let blob = Blob {
                 key: stage.key(),
                 size,
             };
-            state
-                .meta
-                .put_file(&upload, state.clock.now(), &blob, &mut || {
-                    check_upload_deadline(deadline)?;
-                    stage.publish()?;
-                    check_upload_deadline(deadline)
-                })?;
+            stage.publish()?;
+            check_upload_deadline(deadline)?;
+            state.meta.put_file(&upload, state.clock.now(), &blob)?;
             stage.keep();
             let _ = state.meta.collect_garbage(&*state.blobs);
             Ok(())
@@ -325,9 +330,21 @@ async fn put_file(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn upload_permit(server: &Server) -> Result<OwnedSemaphorePermit> {
-    server
-        .0
+struct UploadSlot {
+    slots: Arc<Mutex<HashSet<ShareId>>>,
+    id: ShareId,
+}
+
+impl Drop for UploadSlot {
+    fn drop(&mut self) {
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.remove(&self.id);
+        }
+    }
+}
+
+fn upload_permit(state: &State) -> Result<OwnedSemaphorePermit> {
+    state
         .uploads
         .clone()
         .try_acquire_owned()
@@ -356,26 +373,31 @@ async fn prepare_upload(
     id: &str,
     target: Result<UploadTarget>,
     headers: &HeaderMap,
-) -> Result<(Upload, u64)> {
+) -> Result<(Upload, u64, UploadSlot, OwnedSemaphorePermit)> {
     let id = decode(id).ok_or(Error::Invalid)?;
     let hash = bearer(headers).as_ref().map(token_hash);
     server
         .run(move |state| {
             let now = state.clock.now();
-            if target.is_err() {
-                state.meta.check_pending_upload(&id, now, hash.as_ref())?;
+            state.meta.check_pending_upload(&id, now, hash.as_ref())?;
+            let target = target?;
+            let slots = state.uploading.clone();
+            if !slots.lock().map_err(|_| Error::Internal)?.insert(id) {
+                return Err(Error::UploadInFlight);
             }
+            let slot = UploadSlot { slots, id };
             let upload = Upload {
                 id,
                 hash,
-                target: target?,
+                target,
                 manifest_cap: u64::from(state.limits.manifest_bytes),
                 file_cap: state.limits.files_per_share,
                 total_cap: state.limits.total_ciphertext_bytes,
                 storage_cap: state.limits.storage_bytes,
             };
+            let permit = upload_permit(state)?;
             let cap = state.meta.upload_limit(&upload, now)?;
-            Ok((upload, cap))
+            Ok((upload, cap, slot, permit))
         })
         .await
 }
@@ -523,15 +545,75 @@ async fn download(
     server
         .run(move |state| {
             let blob = state.meta.file(&id, state.clock.now(), n, grant.as_ref())?;
-            let body = state.blobs.download(&blob.key)?;
-            Ok((
-                [(header::CONTENT_TYPE, BINARY)],
-                [(header::CONTENT_LENGTH, blob.size.to_string())],
+            let (status, range) = download_range(&headers, blob.size)?;
+            let body = state
+                .blobs
+                .download(&blob.key, range.start, range.end - range.start)?;
+            let mut response = (
+                status,
+                [
+                    (header::CONTENT_TYPE, BINARY),
+                    (header::ACCEPT_RANGES, "bytes"),
+                ],
+                [(
+                    header::CONTENT_LENGTH,
+                    (range.end - range.start).to_string(),
+                )],
                 body,
             )
-                .into_response())
+                .into_response();
+            if status == StatusCode::PARTIAL_CONTENT {
+                let value = format!("bytes {}-{}/{}", range.start, range.end - 1, blob.size);
+                response.headers_mut().insert(
+                    header::CONTENT_RANGE,
+                    HeaderValue::from_str(&value).map_err(|_| Error::Internal)?,
+                );
+            }
+            Ok(response)
         })
         .await
+}
+
+fn download_range(headers: &HeaderMap, size: u64) -> Result<(StatusCode, Range<u64>)> {
+    let mut values = headers.get_all(header::RANGE).iter();
+    let Some(first) = values.next() else {
+        return Ok((StatusCode::OK, 0..size));
+    };
+    let parse = || {
+        let (start, end) = first
+            .to_str()
+            .ok()?
+            .strip_prefix("bytes=")?
+            .split_once('-')?;
+        let number = |part: &str| {
+            if !part.bytes().all(|digit| digit.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u64>().ok()
+        };
+        let start = number(start)?;
+        let end = if end.is_empty() {
+            size
+        } else {
+            number(end)?.checked_add(1)?
+        };
+        Some(start..end)
+    };
+    let range = parse().ok_or(Error::Invalid)?;
+    let aligned = |offset: u64| {
+        offset
+            .checked_sub(HEADER_LEN as u64)
+            .is_some_and(|offset| offset.is_multiple_of(CHUNK_CIPHERTEXT_LEN as u64))
+    };
+    if values.next().is_some()
+        || range.start >= range.end
+        || range.end > size
+        || (range.start != 0 && !aligned(range.start))
+        || (range.end != size && (!aligned(range.end) || range.end == HEADER_LEN as u64))
+    {
+        return Err(Error::Invalid);
+    }
+    Ok((StatusCode::PARTIAL_CONTENT, range))
 }
 
 async fn delete(

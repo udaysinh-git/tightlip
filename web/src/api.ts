@@ -189,9 +189,16 @@ function readOpenResponse(result: Record<string, unknown>) {
   return { manifest, files: listed, grant, views_left };
 }
 
-export async function downloadFile(id: string, n: number, grant: string) {
-  const response = await request(`${path(id)}/files/${n}`, { headers: bearer(grant) }, 200);
-  if (!response.body) throw new Error(malformed);
+export async function downloadFile(
+  id: string, n: number, grant: string, start: number, size: number, signal: AbortSignal,
+) {
+  const headers = start ? { ...bearer(grant), Range: `bytes=${start}-` } : bearer(grant);
+  const response = await request(`${path(id)}/files/${n}`, { headers, signal }, start ? 206 : 200);
+  if (!response.body || response.headers.get("Content-Length") !== String(size - start)
+    || (start && response.headers.get("Content-Range") !== `bytes ${start}-${size - 1}/${size}`)) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(malformed);
+  }
   return response.body;
 }
 

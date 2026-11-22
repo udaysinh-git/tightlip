@@ -12,8 +12,8 @@ Out of scope for part 1: a recipient who copies the plaintext after a legitimate
 
 Security goals when the server is honest:
 
-1. A share cannot be read after its expiry or after its last view, even by someone who holds the full link and a copy of the ciphertext taken earlier, unless they also completed an OPRF evaluation while the share was live.
-2. Guessing a share password requires one request to the server per guess, and the server destroys the OPRF key after a fixed number of evaluations.
+1. After expiry or the last view, new evaluations stop and the server logically removes the wrapped key. A holder who evaluated while the share was live and retained the answer can still decrypt ciphertext they saved or can retrieve. Files stay available to existing grants until their deadlines. Physical erasure depends on the underlying storage, including filesystems, WAL blocks and snapshots.
+2. A party with the link and without the per-share OPRF key needs one evaluation per password guess. The server caps evaluations per share. An operator with the OPRF key and the link can guess offline at the Argon2id cost.
 3. A database or disk backup taken without the server's key encryption key reveals no OPRF keys.
 
 ## 2. Conventions
@@ -24,7 +24,7 @@ Integers are big-endian. `u32(n)` is four bytes. `lp(x)` is `u32(len(x)) || x`. 
 
 Random bytes come from the operating system CSPRNG (`getrandom`).
 
-Secrets are zeroized on drop. Comparisons of secrets and tags are constant time (`subtle`).
+Rust secret types zeroize their own storage on drop. Browser strings and HTTP buffers can retain copies outside these types. A KEK supplied in the process environment also remains there for the process lifetime. Rust compares secrets and tags with `subtle`.
 
 ## 3. Committing AEAD
 
@@ -140,6 +140,16 @@ owner_verifier  = SHA-256("tightlip/v1/owner-verifier" || owner_token)
 
 The server stores the two verifiers. It learns `access_tag` only when a client presents it to open the share.
 
+The link-bound evaluation credential has its own test vector. Deployment
+requires a create protocol that lets the client bind the credential to the
+share ID before the server stores the share. Today, knowing the share ID is
+enough to call the evaluation endpoint.
+
+```
+eval_tag      = kdf("", link_secret, "tightlip/v1/eval-auth" || share_id, 32)
+eval_verifier = SHA-256("tightlip/v1/eval-verifier" || eval_tag)
+```
+
 ### 6.5 Manifest
 
 The manifest is UTF-8 JSON:
@@ -164,7 +174,7 @@ A client that opens a share rejects a manifest whose `v` is not 1, whose file co
 
 ### 6.6 Server key storage
 
-The server holds a 32 byte key encryption key `KEK`, supplied by the environment and never written to the data volume. It stores each OPRF key as:
+The server holds a 32 byte key encryption key `KEK`. Supply a randomly generated key in a restricted file outside the data volume or through the environment. It stores each OPRF key as:
 
 ```
 k_wrapped = seal(KEK, "tightlip/v1/oprf-key" || share_id, k)
@@ -174,7 +184,7 @@ k_wrapped = seal(KEK, "tightlip/v1/oprf-key" || share_id, k)
 
 All paths are under `/api/v1`. JSON bodies are small and capped at 16 kB. Binary bodies are `application/octet-stream`. Every API response carries `Cache-Control: no-store`.
 
-A share starts pending (created, content not yet committed) and becomes live on commit. Subject to the final attempt, replay and grant rules below, missing, expired, burned and pending shares answer recipient requests with the same `404` and the same body, in the same time.
+A share starts pending (created, content not yet committed) and becomes live on commit. Subject to the final attempt, replay and grant rules below, missing, expired, burned and pending shares answer recipient requests with the same `404` and response body. The server runs dummy cryptographic work on unavailable recipient paths where needed to reduce timing differences. Response times can still vary.
 
 | Request | Body | Effect |
 | --- | --- | --- |
@@ -200,13 +210,17 @@ Limits, all configurable by environment with these defaults:
 | Total ciphertext per share (`TIGHTLIP_TOTAL_CIPHERTEXT_BYTES`) | 25 MB |
 | Global blob and manifest ciphertext (`TIGHTLIP_STORAGE_BYTES`) | 5 GB |
 | Pending share lifetime | 15 minutes |
-| Creates per IP | 30 per hour, token bucket held in memory only |
+| Creates per client bucket | 30 per hour, held in memory. IPv4 uses the address and IPv6 uses the /64. Behind a proxy, the socket peer defines the bucket unless trusted forwarding is enabled. |
+
+The access tag is a reusable bearer credential. Views count successful new opens by tag holders. One holder can spend all the remaining views.
 
 The server stores the SHA-256 hash of each successful request ID per share with the grant window and open's view count. Reuse of that ID after its grant window returns `404`. When the last view is spent, the server deletes the wrapped OPRF key immediately and retains the manifest for retries until the last grant expires. After the final attempt window closes, only authenticated replays and granted downloads remain available.
 
 Destroying a share means, in this order: delete the wrapped OPRF key, delete the row, unlink the blobs. A sweeper destroys expired and stale pending shares at least once a minute, and every request checks expiry itself so the sweeper's timing does not matter for correctness.
 
-The server never logs a share id together with an IP address, never logs request bodies, tokens or tags, and does not persist IP addresses.
+The Rust process logs method, route template, status and latency. It keeps IP rate buckets in memory and excludes actual share IDs, IP addresses, request bodies, tokens and tags from these logs. Reverse-proxy and provider logging depend on the deployment.
+
+Stored metadata includes the share ID, expiry and pending deadline, password flag, view and attempt counts, wrapped OPRF key, encrypted manifest, access and owner verifiers, upload token hash, file indices, blob identifiers and ciphertext sizes, grant hashes and deadlines, hashed open request IDs with deadlines and view counts, the final-attempt deadline, storage totals and pending blob deletions.
 
 The server checks the global ciphertext cap in the transactions that admit creates and uploads. A create at or above the cap, or an upload that would exceed it, returns `429 rate_limited` with `Retry-After: 600`.
 
@@ -247,6 +261,8 @@ The same process serves the web bundle from `TIGHTLIP_WEB_DIR` (default `./web/d
 | --- | --- |
 | `/` and `/s/{id}` | `index.html`, `Cache-Control: no-cache` |
 | `/assets/*` | the file, `Cache-Control: public, max-age=31536000, immutable` |
+| `/.well-known/tightlip-release.json` | `release.json`, `Cache-Control: no-cache` |
+| `/.well-known/security.txt` | Security disclosure contact and expiry, `Cache-Control: no-cache` |
 | `/healthz` | `200`, body `ok` |
 | anything else outside `/api/v1` | `404` |
 
@@ -254,10 +270,11 @@ The web client reads the share id from the path and the link secret from the fra
 
 ## 8. Web delivery
 
-The web app is a static bundle with content hashed file names. The server sends these headers on every response:
+The web app is a static bundle with content hashed file names. The server sends these headers on every response from the application router:
 
 ```
-Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; media-src blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types tightlip-templates tightlip-worker
+Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types tightlip-templates tightlip-worker
+Integrity-Policy: blocked-destinations=(script)
 Referrer-Policy: no-referrer
 X-Content-Type-Options: nosniff
 Cross-Origin-Opener-Policy: same-origin
@@ -267,12 +284,12 @@ Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
 Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
 ```
 
-The page loads nothing from another origin: no fonts, analytics, CDNs or embeds. Every script and style tag carries a subresource integrity hash. The build is reproducible, and each release publishes a manifest of file hashes.
+The page loads its resources from the same origin. The entry script and stylesheet carry subresource integrity hashes. The worker fetches the WebAssembly module with a build-time SHA-384 integrity value and streams it into WebAssembly. The worker script itself uses a same-origin content-hashed URL. A build emits `release.json` containing the source commit and SHA-256 of every other file in `web/dist`. Compare uncached Docker builds to check repeatability and use a trusted copy of the manifest to compare live files. The page origin can replace the HTML, its integrity values and the served manifest together.
 
-The reveal view performs no request that changes state until the person presses reveal. After reading the fragment it removes it from the address bar with `history.replaceState`. Decrypted content is rendered as text nodes or `blob:` URLs, never as HTML.
+The reveal view performs no request that changes state until the person presses reveal. It uses `history.replaceState` to remove the fragment from the address bar. Browsers can still store and sync the full original URL. Recipients can paste a separate key into the keyless page. The client renders decrypted text in text nodes, previews signature-identified JPEG, PNG, GIF and WebP through raster image `blob:` URLs, and creates separate octet-stream downloads.
 
-Before encryption the client removes metadata from images without re-encoding them: JPEG `APP1` to `APP15` and `COM` segments except the ICC profile in `APP2`, and PNG `tEXt`, `zTXt`, `iTXt`, `eXIf` and `tIME` chunks. JPEG orientation is lost with EXIF, so the client reads it first and stores it as `"orientation"` in the file's manifest entry.
+Before encryption the client strips common metadata from JPEG, PNG and WebP without re-encoding them. JPEG drops `APP1` through `APP15` and `COM`, except the ICC profile in `APP2`. It also drops `APP0` JFXX segments and bytes after `EOI`. PNG keeps only `IHDR PLTE IDAT IEND tRNS gAMA cHRM sRGB iCCP sBIT pHYs cICP acTL fcTL fdAT`. WebP drops `EXIF` and `XMP ` and clears those bits in `VP8X`. The client stores the extracted JPEG orientation in the encrypted manifest. JPEG, PNG and WebP can retain data in the formats or chunks that are preserved.
 
 ## 9. Test vectors
 
-`docs/vectors/` holds JSON known answer tests for `kdf` labels, `seal`, `stream_seal`, `padme`, and the full key schedule with a fixed link secret, password, share id, OPRF key and blind. An implementation in any language must reproduce them. Vectors are frozen once M1 is accepted, and a change to any of them needs a new suite identifier.
+`docs/vectors/` holds JSON known answer tests for `kdf` labels, `seal`, `stream_seal`, `padme`, and the full key schedule with a fixed link secret, password, share id, OPRF key and blind. The Rust tests load these fixtures. Independently checkable outputs include HKDF, Padmé, eval authentication and the password and key derivation fields around the OPRF. The original six files stay frozen. Additional scenarios use new files.

@@ -162,6 +162,18 @@ fn derive_secret(salt: &[u8], ikm: &[u8], info: &[&[u8]]) -> Result<Secret32, De
     Ok(Secret32::from_bytes(*bytes))
 }
 
+pub fn eval_tag(link_secret: &Secret32, id: &ShareId) -> Result<Secret32, DeriveError> {
+    derive_secret(b"", link_secret.as_bytes(), &[labels::EVAL_AUTH, id])
+}
+
+pub fn eval_verifier(tag: &Secret32) -> Verifier {
+    verifier(labels::EVAL_VERIFIER, tag)
+}
+
+pub fn verify_eval(tag: &Secret32, expected: &Verifier) -> bool {
+    bool::from(eval_verifier(tag).ct_eq(expected))
+}
+
 pub fn access_verifier(access_tag: &Secret32) -> Verifier {
     verifier(labels::ACCESS_VERIFIER, access_tag)
 }

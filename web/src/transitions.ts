@@ -1,3 +1,4 @@
+import { scatterDust } from "./dust-delete";
 import { flush } from "solid-js";
 
 export const enter = "cubic-bezier(0.22, 1, 0.36, 1)";
@@ -58,17 +59,7 @@ export function finishViewTransition() {
 
 export function paperDust(paper: HTMLElement, pointer: boolean): () => void {
   if (!motionAllowed(pointer)) return () => undefined;
-  const bounds = paper.getBoundingClientRect();
-  const began = performance.now();
-  let cancelled = false;
-  let stop: (() => void) | undefined;
-  void import("./dust-delete").then(({ scatterDust }) => {
-    if (!cancelled) stop = scatterDust(bounds, began);
-  }).catch(() => undefined);
-  return () => {
-    cancelled = true;
-    stop?.();
-  };
+  return scatterDust(paper.getBoundingClientRect(), performance.now());
 }
 
 export function changeView(moment: Moment, update: () => void, pointer: boolean): Promise<void> {

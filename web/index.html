@@ -3,13 +3,31 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>tightlip</title>
+    <title>Tightlip: send a password or file that burns after reading</title>
+    <meta name="description" content="Share a password, a login, a note or a photo through an end-to-end encrypted link. It burns after the view count or the expiry you choose. No account, nothing readable on the server.">
+    <link rel="canonical" href="https://tightlip.buildwithkuro.tech/">
     <link rel="icon" type="image/svg+xml" href="/src/favicon.svg">
-    <meta name="description" content="Send a password, a note or a photo through an encrypted link that burns after it is read.">
     <meta name="theme-color" content="#17161a">
+    <meta name="color-scheme" content="dark">
+    <meta name="referrer" content="no-referrer">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Tightlip">
+    <meta property="og:title" content="Tightlip: a secret that burns after reading">
+    <meta property="og:description" content="Seal a password, a note or a photo into an encrypted link. The server never sees what is inside, and the link stops working after it is read.">
+    <meta property="og:url" content="https://tightlip.buildwithkuro.tech/">
+    <meta property="og:image" content="https://tightlip.buildwithkuro.tech/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="The Tightlip wordmark above a folded note closed with a red wax seal.">
+    <meta name="twitter:card" content="summary_large_image">
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"Tightlip","url":"https://tightlip.buildwithkuro.tech/","description":"Share a password, a login, a note or a photo through an end-to-end encrypted link that burns after it is read.","applicationCategory":"SecurityApplication","operatingSystem":"Any","browserRequirements":"Requires JavaScript and WebAssembly","isAccessibleForFree":true,"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"featureList":["End-to-end encryption in the browser","Links that burn after a set number of views","Expiry from 5 minutes to 30 days","Optional password limited by server-counted attempts","Photo location and camera data removed before upload"],"publisher":{"@type":"Organization","name":"KuroLabs","url":"https://www.kurolabs.in"}}</script>
   </head>
   <body>
     <div id="app"></div>
+    <noscript>
+      <h1>Tightlip</h1>
+      <p>Tightlip seals a password, a login, a note or a photo into an end-to-end encrypted link that burns after it is read. Your browser does the encryption, so Tightlip needs JavaScript and WebAssembly to work.</p>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

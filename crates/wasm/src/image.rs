@@ -10,6 +10,8 @@ pub(crate) fn strip(input: &[u8], mime: &str) -> Result<(Zeroizing<Vec<u8>>, Opt
         jpeg(input).ok_or(Error::Image)
     } else if input.starts_with(PNG) || mime.eq_ignore_ascii_case("image/png") {
         Ok((png(input).ok_or(Error::Image)?, None))
+    } else if mime.eq_ignore_ascii_case("image/webp") {
+        Ok((webp(input).ok_or(Error::Image)?, None))
     } else {
         Err(Error::Image)
     }
@@ -24,7 +26,24 @@ fn png(input: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
         let end = len.checked_add(12)?;
         let (chunk, rest) = remaining.split_at_checked(end)?;
         let kind = &head[4..];
-        if !matches!(kind, b"tEXt" | b"zTXt" | b"iTXt" | b"eXIf" | b"tIME") {
+        if matches!(
+            kind,
+            b"IHDR"
+                | b"PLTE"
+                | b"IDAT"
+                | b"IEND"
+                | b"tRNS"
+                | b"gAMA"
+                | b"cHRM"
+                | b"sRGB"
+                | b"iCCP"
+                | b"sBIT"
+                | b"pHYs"
+                | b"cICP"
+                | b"acTL"
+                | b"fcTL"
+                | b"fdAT"
+        ) {
             output.extend_from_slice(chunk);
         }
         if kind == b"IEND" {
@@ -51,7 +70,7 @@ fn jpeg(input: &[u8]) -> Option<(Zeroizing<Vec<u8>>, Option<u8>)> {
         let marker = marker(input, &mut cursor)?;
         if marker == 0xd9 {
             output.extend_from_slice(&input[start..cursor]);
-            return (cursor == input.len()).then_some((output, orientation));
+            return Some((output, orientation));
         }
         if marker == 0x01 {
             output.extend_from_slice(&input[start..cursor]);
@@ -69,7 +88,8 @@ fn jpeg(input: &[u8]) -> Option<(Zeroizing<Vec<u8>>, Option<u8>)> {
             orientation = data.strip_prefix(b"Exif\0\0").and_then(exif_orientation);
         }
         let icc = marker == 0xe2 && data.starts_with(b"ICC_PROFILE\0") && data.len() >= 14;
-        if !matches!(marker, 0xe1..=0xef | 0xfe) || icc {
+        let thumbnail = marker == 0xe0 && data.starts_with(b"JFXX\0");
+        if (!matches!(marker, 0xe1..=0xef | 0xfe) && !thumbnail) || icc {
             output.extend_from_slice(&input[start..end]);
         }
         cursor = end;
@@ -77,6 +97,35 @@ fn jpeg(input: &[u8]) -> Option<(Zeroizing<Vec<u8>>, Option<u8>)> {
         in_scan = marker == 0xda || (in_scan && marker == 0xdc);
     }
     None
+}
+
+fn webp(input: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    let (size, contents) = input.strip_prefix(b"RIFF")?.split_first_chunk::<4>()?;
+    let bytes = contents.get(..u32::from_le_bytes(*size) as usize)?;
+    let mut remaining = bytes.strip_prefix(b"WEBP")?;
+    let mut output = Zeroizing::new(input.get(..12)?.to_vec());
+    while !remaining.is_empty() {
+        let (head, _) = remaining.split_first_chunk::<8>()?;
+        let len = u32::from_le_bytes(head[4..].try_into().ok()?) as usize;
+        let end = 8usize.checked_add(len)?.checked_add(len % 2)?;
+        let (chunk, rest) = remaining.split_at_checked(end)?;
+        let kind = &head[..4];
+        if !matches!(kind, b"EXIF" | b"XMP ") {
+            let start = output.len();
+            output.extend_from_slice(chunk);
+            if kind == b"VP8X" {
+                if len != 10 {
+                    return None;
+                }
+                // Clear the EXIF and XMP bits, keeping alpha, animation and ICC.
+                output[start + 8] &= !0x0c;
+            }
+        }
+        remaining = rest;
+    }
+    let size = u32::try_from(output.len() - 8).ok()?;
+    output[4..8].copy_from_slice(&size.to_le_bytes());
+    Some(output)
 }
 
 fn marker(input: &[u8], cursor: &mut usize) -> Option<u8> {
@@ -131,7 +180,8 @@ fn exif_orientation(tiff: &[u8]) -> Option<u8> {
         return None;
     }
     let (count, entries) = tiff.get(offset..)?.split_first_chunk::<2>()?;
-    for entry in entries.chunks_exact(12).take(usize::from(u16_at(count)?)) {
+    let (entries, _) = entries.as_chunks::<12>();
+    for entry in entries.iter().take(usize::from(u16_at(count)?)) {
         if u16_at(entry)? == 0x0112 && u16_at(&entry[2..])? == 3 && u32_at(&entry[4..])? == 1 {
             let value = u8::try_from(u16_at(&entry[8..])?).ok()?;
             return (1..=8).contains(&value).then_some(value);
@@ -165,7 +215,7 @@ mod tests {
         let pixels = png_chunk(b"IDAT", &[120, 156, 99, 96, 0, 0, 0, 2, 0, 1]);
         let end = png_chunk(b"IEND", &[]);
         let mut fixture = [PNG, &header].concat();
-        for kind in [b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"] {
+        for kind in [b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME", b"caBX"] {
             fixture.extend(png_chunk(kind, b"test data"));
         }
         fixture.extend_from_slice(&pixels);
@@ -194,6 +244,7 @@ mod tests {
         );
         let icc = jpeg_segment(0xe2, b"ICC_PROFILE\0\x01\x01profile");
         fixture.extend(&app0);
+        fixture.extend(jpeg_segment(0xe0, b"JFXX\0thumbnail"));
         fixture.extend(exif);
         fixture.extend(jpeg_segment(0xe2, b"other APP2"));
         fixture.extend(&icc);
@@ -223,10 +274,43 @@ mod tests {
         assert_eq!(clean.as_slice(), expected);
         assert_eq!(orientation, Some(6));
         assert!(strip(&fixture[..fixture.len() - 1], "image/jpeg").is_err());
+        fixture.extend(b"trailing metadata");
+        assert_eq!(
+            strip(&fixture, "image/jpeg").unwrap().0.as_slice(),
+            expected
+        );
         assert_eq!(
             exif_orientation(b"MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x08\0\0"),
             Some(8)
         );
+    }
+
+    #[test]
+    fn webp_removes_metadata_and_preserves_other_flags() {
+        fn container(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+            let mut data = b"WEBP".to_vec();
+            for (kind, bytes) in chunks {
+                data.extend(*kind);
+                data.extend((bytes.len() as u32).to_le_bytes());
+                data.extend(*bytes);
+                if bytes.len() % 2 != 0 {
+                    data.push(0);
+                }
+            }
+            [b"RIFF", (data.len() as u32).to_le_bytes().as_slice(), &data].concat()
+        }
+        let input = container(&[
+            (b"VP8X", &[0x3e, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            (b"EXIF", b"metadata"),
+            (b"XMP ", b"odd"),
+            (b"ANIM", &[0; 6]),
+        ]);
+        let clean = container(&[
+            (b"VP8X", &[0x32, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            (b"ANIM", &[0; 6]),
+        ]);
+        assert_eq!(strip(&input, "image/webp").unwrap().0.as_slice(), clean);
+        assert!(strip(&input[..input.len() - 1], "image/webp").is_err());
     }
 
     #[test]

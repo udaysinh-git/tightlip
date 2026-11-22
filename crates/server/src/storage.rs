@@ -33,6 +33,8 @@ pub(crate) enum Error {
     TooLarge,
     #[error("uploads must use contiguous file indices")]
     FileGap,
+    #[error("an upload is already in progress for this share")]
+    UploadInFlight,
     #[error("rate limit exceeded")]
     RateLimited { retry_after: i64 },
 }
@@ -104,13 +106,7 @@ pub(crate) trait Metadata: Send + Sync {
     fn check_pending_upload(&self, id: &ShareId, now: i64, hash: Option<&Hash>) -> Result<()>;
     fn upload_limit(&self, upload: &Upload, now: i64) -> Result<u64>;
     fn put_manifest(&self, upload: &Upload, now: i64, contents: &[u8]) -> Result<()>;
-    fn put_file(
-        &self,
-        upload: &Upload,
-        now: i64,
-        blob: &Blob,
-        publish: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<()>;
+    fn put_file(&self, upload: &Upload, now: i64, blob: &Blob) -> Result<()>;
     fn commit(
         &self,
         id: &ShareId,
@@ -135,7 +131,7 @@ pub(crate) trait Metadata: Send + Sync {
 
 pub(crate) trait Blobs: Send + Sync {
     fn stage(&self) -> Result<Box<dyn StagedBlob>>;
-    fn download(&self, key: &BlobKey) -> Result<Body>;
+    fn download(&self, key: &BlobKey, start: u64, len: u64) -> Result<Body>;
     fn remove(&self, key: &BlobKey) -> Result<()>;
 }
 

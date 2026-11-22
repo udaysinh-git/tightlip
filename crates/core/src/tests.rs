@@ -207,10 +207,12 @@ fn stream_rejects_missing_reordered_duplicate_and_appended_chunks() {
     let aad = b"file";
     let wire = stream::stream_seal(&key, aad, &vec![7; CHUNK_LEN * 3]).unwrap();
     let (header, body) = wire.split_at(HEADER_LEN);
-    let mut chunks = body.chunks_exact(CHUNK_CIPHERTEXT_LEN);
-    let first = chunks.next().unwrap();
-    let second = chunks.next().unwrap();
-    let final_chunk = chunks.next().unwrap();
+    let (chunks, _) = body.as_chunks::<CHUNK_CIPHERTEXT_LEN>();
+    let [first, second, final_chunk] = chunks else {
+        panic!("expected three full ciphertext chunks");
+    };
+    let (first, second, final_chunk) =
+        (first.as_slice(), second.as_slice(), final_chunk.as_slice());
 
     for invalid in [
         [header, first].concat(),

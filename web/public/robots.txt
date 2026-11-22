@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /$
+Allow: /security$
+Disallow: /s/
+Disallow: /api/
+
+Sitemap: https://tightlip.buildwithkuro.tech/sitemap.xml

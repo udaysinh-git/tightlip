@@ -1,10 +1,12 @@
 # Tightlip
 
+Live at [tightlip.buildwithkuro.tech](https://tightlip.buildwithkuro.tech). How it protects a secret, in plain words: [/security](https://tightlip.buildwithkuro.tech/security).
+
 Tightlip shares credentials, text, images and files through end-to-end encrypted
 links with an expiry and a view limit. Link shares work without an account.
 
 The sender's browser encrypts the content and uploads ciphertext. The secret
-part of the link follows the `#` and stays in the browser. The recipient opens
+part of the link follows the `#`. HTTP requests omit it, but browsers can store and sync the full URL. You can send the link and key separately. The recipient opens
 the link and presses Reveal. The browser uses the link secret, the optional
 password and a blinded evaluation from the server to derive the decryption key.
 Loading the page or generating a link preview does not spend a view.
@@ -13,39 +15,48 @@ Loading the page or generating a link preview does not spend a view.
 
 The protocol assumes the server may read, alter, replay, swap or withhold stored
 data and see traffic after TLS. When both browsers run the intended client, the
-server sees ciphertext, padded lengths and metadata such as the expiry, view
-count and whether a password is required. The content, file names, file types,
+server stores ciphertext and metadata, including padded sizes, the expiry,
+password flag, view and attempt counts, a wrapped OPRF key, and hashes of
+authorization credentials and successful open request IDs. The protocol
+spec lists the stored fields. This includes the share ID, pending deadline,
+final-attempt deadline, file indices and blob identifiers, grant and open
+deadlines, view counts at open, aggregate storage totals and pending
+blob deletions. The content, file names, file types,
 password and link secret stay private. The client detects tampering with the
 encrypted content. The server can deny access at any time.
 
-The server is trusted to count views, enforce expiry and destroy per-share keys
-on time. After expiry or the last view, a saved link and ciphertext are
-insufficient unless the holder also completed a valid key evaluation while the
-share was live. An honest server requires a request for each password guess and
-destroys the share when the attempt limit is reached. A backup of the data
-volume without the key encryption key (KEK) reveals no per-share keys.
+The server counts new opens by tag holders, enforces expiry and logically
+deletes the wrapped per-share key after expiry, the last view or the last
+evaluation. An existing file grant can remain active for up to 10 minutes. A
+holder can keep plaintext or retain an earlier evaluation and ciphertext.
+Freed disk blocks and snapshots may preserve old data. Protect a randomly
+generated key encryption key (KEK) separately from the data volume. Old storage
+copies plus that key can expose wrapped OPRF keys. The current evaluation
+endpoint lets someone who knows the share ID spend attempts.
 
 The server delivers the JavaScript, so a compromised server can send code that
-steals plaintext, passwords or link secrets. A static bundle, strict content
-security policy, Trusted Types, subresource integrity, same-origin resources and
-reproducible build checks reduce delivery risks. A browser still trusts the
-server for the page it receives. Endpoint malware and recipients who keep a copy
-of revealed plaintext are outside the threat model.
+steals plaintext, passwords or link secrets. Content security policy and
+Trusted Types limit some injection. Browser integrity checks cover the page
+script, stylesheet and WebAssembly against the expected hashes received from
+the origin. The origin can replace the page and the hashes together. Independent
+comparison requires a trusted copy of the release manifest. Endpoint malware
+and recipients who keep revealed plaintext are outside the threat model.
 
-Tightlip has had no external security audit. See the [protocol spec](docs/SPEC.md)
-for details.
+An independent review examined commit `806ec31` and the deployment available at
+the time. See the [protocol spec](docs/SPEC.md) for details.
 
 ## Run locally
 
-Use a checkout that includes `crates/wasm` and `web/`. Install stable Rust with
-its native build tools and Node.js 22. The examples use Bash, which is available
+Use a checkout that includes `crates/wasm` and `web/`. Install Rustup, native
+build tools and Node.js 22. Rustup reads the toolchain and WASM target pins
+from `rust-toolchain.toml`. The examples use Bash, which is available
 in Git for Windows.
 
 ```sh
 export CARGO_BUILD_JOBS=2
 rustup target add wasm32-unknown-unknown
 cargo install --locked --version 0.2.130 wasm-bindgen-cli
-(cd web && npm ci && npm run build)
+(cd web && npm ci --ignore-scripts && npm run build)
 ```
 
 Generate a KEK once and save it somewhere private, such as a password manager.
@@ -69,27 +80,32 @@ and serves the bundle from `./web/dist` by default.
 
 ## Self-host with Docker
 
-Build on a host with Docker BuildKit from a checkout that includes the web app.
-Export the saved `TIGHTLIP_KEK` as shown above before starting the container.
+Build on a host with Docker BuildKit from a clean checkout. Pass the full
+source commit as a build argument. Mount a private KEK file readable by the
+container user, outside the data volume.
 
 ```sh
-docker buildx build --load -t tightlip:local .
+docker buildx build --load --build-arg "TIGHTLIP_RELEASE_COMMIT=$(git rev-parse HEAD)" -t tightlip:local .
 docker volume create tightlip-data
 docker run -d --name tightlip --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
   --mount type=volume,source=tightlip-data,target=/data \
-  --env TIGHTLIP_KEK \
+  --mount "type=bind,source=$TIGHTLIP_HOST_KEK_FILE,target=/run/tightlip-kek,readonly" \
+  --env TIGHTLIP_KEK_FILE=/run/tightlip-kek \
   tightlip:local
 ```
 
 For public hosting, put an HTTPS reverse proxy in front of port `8080`. On
 KuroPanel, build from the Dockerfile, mount a persistent volume at `/data`,
-set the KEK as a secret environment variable and route HTTPS to port `8080`.
+mount the KEK file, supply the source commit as a build argument and route
+HTTPS to port `8080`. Set `TIGHTLIP_HOST_KEK_FILE` to the absolute host path
+for the Docker example above.
 The container runs as UID and GID `65532` and probes `/healthz`.
 
 | Variable | Use |
 | --- | --- |
-| `TIGHTLIP_KEK` | Required. Unpadded base64url of 32 random bytes. |
+| `TIGHTLIP_KEK_FILE` | Preferred. File containing unpadded base64url of 32 random bytes, optionally followed by a newline. Group and world read permissions are rejected on Unix. |
+| `TIGHTLIP_KEK` | Used when the file path is unset. Unpadded base64url of 32 random bytes. |
 | `TIGHTLIP_DATA_DIR` | SQLite database and blobs. Defaults to `/data` in Docker and `./data` locally. |
 | `TIGHTLIP_WEB_DIR` | Built bundle. Defaults to `/app/web` in Docker and `./web/dist` locally. |
 | `PORT` | HTTP listen port. Defaults to `8080`. Match the container port in the proxy or port mapping. |
@@ -116,6 +132,13 @@ becomes unreadable, even if you restore the volume.
 
 ## Check the bundle
 
-With the local build tools installed, run `bash scripts/reproducible-check.sh`
-from a commit that includes the web app. The script builds two copies of `HEAD`
-and compares SHA-256 hashes by relative path for every file in `web/dist/`.
+With Docker BuildKit available, run `bash scripts/reproducible-check.sh` from a
+commit that includes the web app. It builds `HEAD` twice without the Docker
+layer cache and compares the files extracted from both images. Pass a deployed
+origin as an optional argument to compare the first build with that endpoint.
+
+The build writes `web/dist/release.json` and the server exposes it at
+`/.well-known/tightlip-release.json`. Run
+`bash scripts/verify-live.sh <origin> <release.json>` with a trusted manifest
+to verify the deployed index and assets. Signing the manifest and publishing
+it outside the deployment are separate manual release steps.

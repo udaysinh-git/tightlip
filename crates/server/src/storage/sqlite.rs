@@ -156,13 +156,7 @@ impl Metadata for Sqlite {
         Ok(())
     }
 
-    fn put_file(
-        &self,
-        upload: &Upload,
-        now: i64,
-        blob: &Blob,
-        publish: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<()> {
+    fn put_file(&self, upload: &Upload, now: i64, blob: &Blob) -> Result<()> {
         let UploadTarget::File(n) = upload.target else {
             return Err(Error::Internal);
         };
@@ -181,7 +175,6 @@ impl Metadata for Sqlite {
              ON CONFLICT(share_id, n) DO UPDATE SET blob_key = excluded.blob_key, size = excluded.size",
             params![upload.id, n, blob.key, size],
         )?;
-        publish()?;
         tx.commit()?;
         Ok(())
     }

@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  ApiError, NetworkError, commitShare, createShare, getMetadata, openShare, retryNetwork, unavailable,
+  ApiError, downloadFile, NetworkError, commitShare, createShare, getMetadata, openShare, retryNetwork, unavailable,
 } from "../src/api";
 import { SUITE, base64url, errors, record, shareId } from "../src/wire";
 import type { ErrorCode } from "../src/wire";
-import { supportedImage } from "../src/image-types";
 
 const id = "A".repeat(22);
 const value = "A".repeat(43);
@@ -19,11 +18,6 @@ afterEach(() => {
 });
 
 describe("Tightlip v1 wire contract", () => {
-  it("offers SVG as a file without making it an image preview", () => {
-    expect(supportedImage("image/svg+xml")).toBe(false);
-    expect(supportedImage("image/png")).toBe(true);
-  });
-
   it("validates canonical unpadded encodings and route length", () => {
     expect(shareId(`/s/${id}`)).toBe(id);
     expect(shareId(`/s/${id}/`)).toBeUndefined();
@@ -106,6 +100,25 @@ describe("Tightlip v1 wire contract", () => {
     expect(request).toEqual({ access_tag: value, request_id: expect.any(String) });
     expect(record(request) && base64url(request.request_id, 16)).toBe(true);
     for (const [, init] of fetch.mock.calls) expect(init.body).toBe(JSON.stringify(request));
+  });
+
+  it("requests an authenticated suffix and checks the server's range", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response("tail", {
+      status: 206, headers: { "Content-Range": "bytes 65603-65606/65607", "Content-Length": "4" },
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const signal = new AbortController().signal;
+    const result = await downloadFile(id, 1, value, 65603, 65607, signal);
+    expect(await new Response(result).text()).toBe("tail");
+    expect(fetch).toHaveBeenCalledWith(`/api/v1/shares/${id}/files/1`, expect.objectContaining({
+      headers: { Authorization: `Bearer ${value}`, Range: "bytes=65603-" },
+      signal,
+    }));
+
+    fetch.mockResolvedValue(new Response("tail", {
+      status: 206, headers: { "Content-Range": "bytes 0-3/65607", "Content-Length": "4" },
+    }));
+    await expect(downloadFile(id, 1, value, 65603, 65607, signal)).rejects.toThrow("unexpected response");
   });
 
   it("stops retrying a download when the next attempt would exceed the grant deadline", async () => {

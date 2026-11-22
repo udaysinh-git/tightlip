@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "matched-path", "tokio"] }
 base64 = "=0.23.1"
+hyper = { version = "=1.12.0", features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", features = ["server-graceful", "service", "tokio"] }
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 sha2 = { version = "=0.11.1", default-features = false, features = ["zeroize"] }

@@ -16,10 +16,11 @@ WORKDIR /src
 COPY . .
 
 WORKDIR /src/web
+ARG TIGHTLIP_RELEASE_COMMIT
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    npm ci && npm run build
+    npm ci --ignore-scripts && TIGHTLIP_RELEASE_COMMIT="$TIGHTLIP_RELEASE_COMMIT" npm run build
 
 WORKDIR /src
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
