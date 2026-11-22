@@ -30,6 +30,7 @@ export interface RevealedFile extends VisibleFile {
 
 export interface Revealed extends Content {
   files: RevealedFile[];
+  failedFiles: string[];
   viewsLeft?: number;
 }
 
@@ -70,4 +71,4 @@ export type Result = Operations[Operation]["output"];
 export type Reply =
   | { id: number; progress: Progress }
   | { id: number; result: Result }
-  | { id: number; error: string; usedView: boolean; wrongPassword?: boolean };
+  | { id: number; error: string; usedView: boolean; attemptsLeft?: number };

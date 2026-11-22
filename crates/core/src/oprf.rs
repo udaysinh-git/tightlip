@@ -1,9 +1,12 @@
 //! RFC 9497 base-mode OPRF over ristretto255 and SHA-512.
 
+use std::num::NonZeroU32;
+
 use curve25519_dalek::scalar::Scalar;
+use rand_core::{CryptoRng, RngCore};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
-use voprf::{BlindedElement, EvaluationElement, Group, OprfClient, OprfServer, Ristretto255};
+use voprf::{BlindedElement, EvaluationElement, OprfClient, OprfServer, Ristretto255};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{RandomError, Secret32, secret::fill_random};
@@ -37,7 +40,65 @@ impl Output {
 
 /// Blinds the 32-byte input produced by the Tightlip share key schedule.
 pub fn blind(input: &Secret32) -> Result<([u8; 32], ClientState), OprfError> {
-    blind_inner(input.as_bytes(), random_scalar()?)
+    blind_with_rng(input, fill_random)
+}
+
+fn blind_with_rng(
+    input: &Secret32,
+    fill: fn(&mut [u8]) -> Result<(), RandomError>,
+) -> Result<([u8; 32], ClientState), OprfError> {
+    let mut rng = SystemRng {
+        fill,
+        failed: false,
+    };
+    let exchange = Client::blind(input.as_bytes(), &mut rng);
+    if rng.failed {
+        return Err(RandomError.into());
+    }
+    let exchange = exchange.map_err(|_| OprfError::InvalidInput)?;
+    let blind = Zeroizing::new(exchange.state.serialize());
+    Ok((
+        exchange.message.serialize().into(),
+        ClientState {
+            input: input.as_bytes().to_vec(),
+            blind: Secret32::from_bytes(*blind.as_ref()),
+        },
+    ))
+}
+
+struct SystemRng {
+    fill: fn(&mut [u8]) -> Result<(), RandomError>,
+    failed: bool,
+}
+
+impl CryptoRng for SystemRng {}
+
+impl RngCore for SystemRng {
+    fn next_u32(&mut self) -> u32 {
+        rand_core::impls::next_u32_via_fill(self)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        rand_core::impls::next_u64_via_fill(self)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        if self.try_fill_bytes(dest).is_err() {
+            // The infallible API needs a nonzero scalar to finish its sampling loop.
+            // The caller discards the entire result if system randomness failed.
+            dest.fill(0);
+            if let Some(first) = dest.first_mut() {
+                *first = 1;
+            }
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        (self.fill)(dest).map_err(|_| {
+            self.failed = true;
+            rand_core::Error::from(NonZeroU32::MAX)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -45,11 +106,8 @@ pub(crate) fn blind_with_scalar(
     input: &[u8],
     blind: Secret32,
 ) -> Result<([u8; 32], ClientState), OprfError> {
-    blind_inner(input, blind)
-}
+    use voprf::Group;
 
-fn blind_inner(input: &[u8], blind: Secret32) -> Result<([u8; 32], ClientState), OprfError> {
-    // Supply the sampled scalar through the library's checked canonical decoder.
     let scalar =
         Ristretto255::deserialize_scalar(blind.as_bytes()).map_err(|_| OprfError::InvalidInput)?;
     let exchange = Client::deterministic_blind_unchecked(input, scalar)
@@ -128,5 +186,18 @@ fn random_scalar() -> Result<Secret32, RandomError> {
         if !bool::from(secret.as_bytes().ct_eq(&[0; 32])) {
             return Ok(secret);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blinding_returns_an_error_when_system_randomness_fails() {
+        assert!(matches!(
+            blind_with_rng(&Secret32::from_bytes([0; 32]), |_| Err(RandomError)),
+            Err(OprfError::Random(RandomError))
+        ));
     }
 }

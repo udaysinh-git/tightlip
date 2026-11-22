@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use subtle::ConstantTimeEq;
 use tightlip_core::{
     Secret32, labels,
@@ -13,25 +13,67 @@ use tightlip_core::{
 };
 
 use super::{
-    Blob, BlobKey, Blobs, Error, Evaluate, FileInfo, Hash, Metadata, Opened, Pending, Result,
-    ShareInfo, Upload, UploadTarget,
+    Blob, BlobKey, Blobs, Error, Evaluate, FileInfo, Hash, Metadata, OpenRequest, Opened, Pending,
+    Result, ShareInfo, Upload, UploadTarget,
 };
 
 const LIVE: &str = "id = ?1 AND expires_at > ?2 AND pending_until IS NULL
                     AND views_left > 0 AND attempts_left > 0";
+const OPENABLE: &str = "id = ?1 AND expires_at > ?2 AND pending_until IS NULL
+                        AND views_left > 0 AND (final_attempt_until IS NULL OR final_attempt_until > ?2)";
+const FINAL_ATTEMPT_SECONDS: i64 = 120;
 const GRANT_SECONDS: i64 = 600;
+const STORAGE_FULL: Error = Error::RateLimited { retry_after: 600 };
 const DUMMY_HASH: Hash = [0; 32];
+const SCHEMA_VERSION: u32 = 1;
 
 pub(crate) struct Sqlite(Mutex<Connection>);
 
 impl Sqlite {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "secure_delete", "ON")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.execute_batch(include_str!("schema.sql"))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version = tx.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(Error::Internal);
+        }
+        let shares_exist: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'shares')",
+            [],
+            |row| row.get(0),
+        )?;
+        let migrate = version == 0 && shares_exist;
+        if migrate {
+            tx.execute_batch(
+                "ALTER TABLE files RENAME TO old_files;
+                 ALTER TABLE grants RENAME TO old_grants;
+                 DROP INDEX grants_expiry;
+                 DROP INDEX grants_share;
+                 DROP INDEX grants_lookup;
+                 ALTER TABLE shares ADD COLUMN final_attempt_until INTEGER;
+                 ALTER TABLE blob_garbage ADD COLUMN size INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        tx.execute_batch(include_str!("schema.sql"))?;
+        if migrate {
+            tx.execute_batch(
+                "INSERT INTO files SELECT * FROM old_files;
+                 INSERT INTO grants
+                     SELECT g.hash, g.share_id, MIN(g.expires_at, s.expires_at)
+                     FROM old_grants g JOIN shares s ON s.id = g.share_id;
+                 DROP TABLE old_files;
+                 DROP TABLE old_grants;",
+            )?;
+        }
+        if version == 0 {
+            tx.execute_batch(include_str!("accounting.sql"))?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        tx.commit()?;
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -49,11 +91,21 @@ impl Sqlite {
 }
 
 impl Metadata for Sqlite {
-    fn create(&self, pending: &Pending) -> Result<()> {
-        self.connection()?.execute(
+    fn check_storage(&self, storage_cap: u64) -> Result<()> {
+        let conn = self.connection()?;
+        check_storage(&conn, storage_cap)
+    }
+
+    fn create(&self, pending: &Pending, storage_cap: u64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_storage(&tx, storage_cap)?;
+        let created = tx.execute(
             "INSERT INTO shares(id, expires_at, pending_until, has_password, views_left,
                                 attempts_left, upload_hash, wrapped_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+             WHERE NOT EXISTS (SELECT 1 FROM grants WHERE share_id = ?1)
+               AND NOT EXISTS (SELECT 1 FROM files WHERE share_id = ?1)",
             params![
                 pending.id,
                 pending.expires_at,
@@ -65,6 +117,10 @@ impl Metadata for Sqlite {
                 pending.wrapped_key
             ],
         )?;
+        if created == 0 {
+            return Err(Error::Internal);
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -75,14 +131,22 @@ impl Metadata for Sqlite {
 
     fn upload_limit(&self, upload: &Upload, now: i64) -> Result<u64> {
         let conn = self.connection()?;
-        upload_limit(&conn, upload, now)
+        let (cap, used) = upload_space(&conn, upload, now)?;
+        if used >= upload.storage_cap {
+            return Err(STORAGE_FULL);
+        }
+        Ok(cap)
     }
 
     fn put_manifest(&self, upload: &Upload, now: i64, contents: &[u8]) -> Result<()> {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if contents.len() as u64 > upload_limit(&tx, upload, now)? {
+        let (cap, used) = upload_space(&tx, upload, now)?;
+        if contents.len() as u64 > cap {
             return Err(Error::TooLarge);
+        }
+        if used.saturating_add(contents.len() as u64) > upload.storage_cap {
+            return Err(STORAGE_FULL);
         }
         tx.execute(
             "UPDATE shares SET manifest = ?2 WHERE id = ?1",
@@ -104,17 +168,18 @@ impl Metadata for Sqlite {
         };
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if blob.size > upload_limit(&tx, upload, now)? {
+        let (cap, used) = upload_space(&tx, upload, now)?;
+        if blob.size > cap {
             return Err(Error::TooLarge);
         }
-        tx.execute(
-            "INSERT INTO blob_garbage SELECT blob_key FROM files WHERE share_id = ?1 AND n = ?2",
-            params![upload.id, n],
-        )?;
+        if used.saturating_add(blob.size) > upload.storage_cap {
+            return Err(STORAGE_FULL);
+        }
+        let size = i64::try_from(blob.size).map_err(|_| Error::TooLarge)?;
         tx.execute(
             "INSERT INTO files(share_id, n, blob_key, size) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(share_id, n) DO UPDATE SET blob_key = excluded.blob_key, size = excluded.size",
-            params![upload.id, n, blob.key, blob.size],
+            params![upload.id, n, blob.key, size],
         )?;
         publish()?;
         tx.commit()?;
@@ -190,7 +255,11 @@ impl Metadata for Sqlite {
         let evaluated = evaluated?;
         let attempts = attempts.ok_or(Error::Missing)?;
         if attempts == 0 {
-            destroy(&tx, id)?;
+            tx.execute(
+                "UPDATE shares SET wrapped_key = NULL, final_attempt_until = MIN(expires_at, ?2)
+                 WHERE id = ?1",
+                params![id, now.saturating_add(FINAL_ATTEMPT_SECONDS)],
+            )?;
         }
         tx.commit()?;
         if attempts == 0 {
@@ -199,51 +268,76 @@ impl Metadata for Sqlite {
         Ok((evaluated, attempts))
     }
 
-    fn open(&self, id: &ShareId, now: i64, tag: Result<Secret32>, grant: &Hash) -> Result<Opened> {
+    fn open(
+        &self,
+        id: &ShareId,
+        now: i64,
+        request: Result<OpenRequest>,
+        grant: &Hash,
+    ) -> Result<Opened> {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let verifier: Option<Verifier> = tx
+        let request_hash = request
+            .as_ref()
+            .map_or(&DUMMY_HASH, |body| &body.request_hash);
+        let replay: Option<(u32, i64)> = tx
             .query_row(
-                &format!("SELECT access_verifier FROM shares WHERE {LIVE}"),
+                "SELECT views_left, expires_at FROM open_requests WHERE share_id = ?1 AND hash = ?2",
+                params![id, request_hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let state: Option<(Verifier, i64, bool)> = tx
+            .query_row(
+                "SELECT access_verifier, expires_at, views_left > 0
+                     AND (final_attempt_until IS NULL OR final_attempt_until > ?2)
+                 FROM shares WHERE id = ?1 AND expires_at > ?2 AND pending_until IS NULL",
                 params![id, now],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
         let dummy = Secret32::from_bytes([0; 32]);
         let matches = verify_access(
-            tag.as_ref().unwrap_or(&dummy),
-            verifier.as_ref().unwrap_or(&DUMMY_HASH),
+            request.as_ref().map_or(&dummy, |body| &body.tag),
+            state
+                .as_ref()
+                .map_or(&DUMMY_HASH, |(verifier, _, _)| verifier),
         );
-        let authorized = matches && tag.is_ok() && verifier.is_some();
-        let manifest: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT manifest FROM shares WHERE id = ?1 AND ?2",
-                params![id, authorized],
-                |row| row.get(0),
-            )
-            .optional()?;
-        // SQLite evaluates the assignment expressions against the old row.
-        let views_left: Option<u32> = tx
-            .query_row(
-                &format!(
-                    "UPDATE shares SET views_left = views_left - 1,
-                         wrapped_key = CASE WHEN views_left = 1 THEN NULL ELSE wrapped_key END,
-                         manifest = CASE WHEN views_left = 1 THEN NULL ELSE manifest END
-                      WHERE {LIVE} AND ?3 RETURNING views_left"
-                ),
-                params![id, now, authorized],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if verifier.is_none() {
+        let (_, expires_at, openable) = state.ok_or(Error::Missing)?;
+        if replay.is_some_and(|(_, until)| until <= now)
+            || !(openable || (replay.is_some() && matches && request.is_ok()))
+        {
             return Err(Error::Missing);
         }
-        let _ = tag?;
+        let request = request?;
         if !matches {
             return Err(Error::Unauthorized);
         }
-        let views_left = views_left.ok_or(Error::Missing)?;
-        let manifest = manifest.ok_or(Error::Internal)?;
+        let (views_left, grant_until) = if let Some(snapshot) = replay {
+            snapshot
+        } else {
+            let views_left: u32 = tx.query_row(
+                &format!(
+                    "UPDATE shares SET views_left = views_left - 1,
+                         wrapped_key = CASE WHEN views_left = 1 THEN NULL ELSE wrapped_key END
+                     WHERE {OPENABLE} RETURNING views_left"
+                ),
+                params![id, now],
+                |row| row.get(0),
+            )?;
+            let grant_until = expires_at.min(now.saturating_add(GRANT_SECONDS));
+            tx.execute(
+                "INSERT INTO open_requests(share_id, hash, expires_at, views_left)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id, request.request_hash, grant_until, views_left],
+            )?;
+            (views_left, grant_until)
+        };
+        let manifest = tx.query_row(
+            "SELECT manifest FROM shares WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
         let files = {
             let mut statement =
                 tx.prepare("SELECT n, size FROM files WHERE share_id = ?1 ORDER BY n")?;
@@ -251,17 +345,17 @@ impl Metadata for Sqlite {
                 .query_map(params![id], |row| {
                     Ok(FileInfo {
                         n: row.get(0)?,
-                        size: row.get(1)?,
+                        size: read_size(row, 1)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         tx.execute(
             "INSERT INTO grants(hash, share_id, expires_at) VALUES (?1, ?2, ?3)",
-            params![grant, id, now.saturating_add(GRANT_SECONDS)],
+            params![grant, id, grant_until],
         )?;
         tx.commit()?;
-        if views_left == 0 {
+        if views_left == 0 && replay.is_none() {
             checkpoint(&conn);
         }
         Ok(Opened {
@@ -274,28 +368,28 @@ impl Metadata for Sqlite {
     fn file(&self, id: &ShareId, now: i64, n: u32, grant: Option<&Hash>) -> Result<Blob> {
         let presented = grant.unwrap_or(&DUMMY_HASH);
         // The truncated digest routes the lookup. The full digest authenticates.
-        let found: Option<(Option<Hash>, Option<Blob>, bool)> = self
-            .connection()?
-            .query_row(
-                "SELECT g.hash, f.blob_key, f.size, s.views_left > 0 AND s.attempts_left > 0
-                 FROM shares s
-                 LEFT JOIN grants g ON g.share_id = s.id
+        let (expected, blob, live): (Option<Hash>, Option<Blob>, bool) =
+            self.connection()?.query_row(
+                "SELECT g.hash, f.blob_key, f.size, COALESCE(s.views_left > 0 AND s.attempts_left > 0, 0)
+                 FROM (SELECT ?1 AS id) requested
+                 LEFT JOIN shares s ON s.id = requested.id
+                    AND s.expires_at > ?2 AND s.pending_until IS NULL
+                 LEFT JOIN grants g ON g.share_id = requested.id
                     AND g.expires_at > ?2 AND substr(g.hash, 1, 16) = ?4
-                 LEFT JOIN files f ON f.share_id = s.id AND f.n = ?3
-                 WHERE s.id = ?1 AND s.expires_at > ?2 AND s.pending_until IS NULL",
+                 LEFT JOIN files f ON f.share_id = requested.id AND f.n = ?3",
                 params![id, now, n, &presented[..16]],
                 |row| {
                     let key: Option<BlobKey> = row.get(1)?;
-                    let size: Option<u64> = row.get(2)?;
-                    let blob = key.zip(size).map(|(key, size)| Blob { key, size });
+                    let blob = if let Some(key) = key {
+                        Some(Blob { key, size: read_size(row, 2)? })
+                    } else {
+                        None
+                    };
                     Ok((row.get(0)?, blob, row.get(3)?))
                 },
-            )
-            .optional()?;
-        let expected = found.as_ref().and_then(|(hash, _, _)| hash.as_ref());
-        let matches = bool::from(presented.ct_eq(expected.unwrap_or(&DUMMY_HASH)));
+            )?;
+        let matches = bool::from(presented.ct_eq(expected.as_ref().unwrap_or(&DUMMY_HASH)));
         let authenticated = matches && grant.is_some() && expected.is_some();
-        let (_, blob, live) = found.ok_or(Error::Missing)?;
         if !authenticated {
             return Err(if live {
                 Error::Unauthorized
@@ -329,6 +423,11 @@ impl Metadata for Sqlite {
             return Err(Error::Unauthorized);
         }
         destroy(&tx, id)?;
+        tx.execute(
+            "DELETE FROM files WHERE share_id = ?1 AND NOT EXISTS (
+                SELECT 1 FROM grants WHERE share_id = ?1 AND expires_at > ?2)",
+            params![id, now],
+        )?;
         tx.commit()?;
         checkpoint(&conn);
         Ok(())
@@ -343,7 +442,9 @@ impl Metadata for Sqlite {
                 "SELECT id FROM shares
                  WHERE expires_at <= ?1 OR pending_until <= ?1
                     OR (views_left = 0 AND NOT EXISTS (
-                        SELECT 1 FROM grants WHERE share_id = shares.id))",
+                        SELECT 1 FROM grants WHERE share_id = shares.id))
+                    OR (final_attempt_until <= ?1 AND NOT EXISTS (
+                        SELECT 1 FROM open_requests WHERE share_id = shares.id AND expires_at > ?1))",
             )?;
             statement
                 .query_map(params![now], |row| row.get(0))?
@@ -352,6 +453,12 @@ impl Metadata for Sqlite {
         for id in doomed {
             destroy(&tx, &id)?;
         }
+        tx.execute(
+            "DELETE FROM files
+             WHERE NOT EXISTS (SELECT 1 FROM shares WHERE id = files.share_id)
+               AND NOT EXISTS (SELECT 1 FROM grants WHERE share_id = files.share_id)",
+            [],
+        )?;
         tx.commit()?;
         checkpoint(&conn);
         Ok(())
@@ -391,7 +498,7 @@ fn pending_auth(
             "SELECT upload_hash, COALESCE(length(manifest), 0) FROM shares
          WHERE id = ?1 AND expires_at > ?2 AND pending_until > ?2",
             params![id, now],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, read_size(row, 1)?)),
         )
         .optional()?;
     let expected = row.as_ref().map_or(&DUMMY_HASH, |(expected, _)| expected);
@@ -403,18 +510,20 @@ fn pending_auth(
     Ok(PendingAuth { manifest_size })
 }
 
-fn upload_limit(conn: &Connection, upload: &Upload, now: i64) -> Result<u64> {
+fn upload_space(conn: &Connection, upload: &Upload, now: i64) -> Result<(u64, u64)> {
     let pending = pending_auth(conn, &upload.id, now, upload.hash.as_ref())?;
+    let used = storage_used(conn)?;
     match upload.target {
         UploadTarget::Manifest => {
             let file_bytes: u64 = conn.query_row(
                 "SELECT COALESCE(SUM(size), 0) FROM files WHERE share_id = ?1",
                 params![upload.id],
-                |row| row.get(0),
+                |row| read_size(row, 0),
             )?;
-            Ok(upload
+            let cap = upload
                 .manifest_cap
-                .min(upload.total_cap.saturating_sub(file_bytes)))
+                .min(upload.total_cap.saturating_sub(file_bytes));
+            Ok((cap, used.saturating_sub(pending.manifest_size)))
         }
         UploadTarget::File(n) => {
             if n >= upload.file_cap {
@@ -424,14 +533,15 @@ fn upload_limit(conn: &Connection, upload: &Upload, now: i64) -> Result<u64> {
                 "SELECT COUNT(*), COALESCE(SUM(CASE WHEN n != ?2 THEN size ELSE 0 END), 0)
                  FROM files WHERE share_id = ?1",
                 params![upload.id, n],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, read_size(row, 1)?)),
             )?;
             if n > count {
                 return Err(Error::FileGap);
             }
-            Ok(upload
+            let cap = upload
                 .total_cap
-                .saturating_sub(other_bytes.saturating_add(pending.manifest_size)))
+                .saturating_sub(other_bytes.saturating_add(pending.manifest_size));
+            Ok((cap, used))
         }
     }
 }
@@ -441,11 +551,27 @@ fn destroy(tx: &Transaction<'_>, id: &ShareId) -> Result<()> {
         "UPDATE shares SET wrapped_key = NULL, manifest = NULL WHERE id = ?1",
         params![id],
     )?;
-    tx.execute(
-        "INSERT INTO blob_garbage SELECT blob_key FROM files WHERE share_id = ?1",
-        params![id],
-    )?;
     tx.execute("DELETE FROM shares WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+fn storage_used(conn: &Connection) -> Result<u64> {
+    Ok(
+        conn.query_row("SELECT bytes FROM storage_usage", [], |row| {
+            read_size(row, 0)
+        })?,
+    )
+}
+
+fn read_size(row: &Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+fn check_storage(conn: &Connection, cap: u64) -> Result<()> {
+    if storage_used(conn)? >= cap {
+        return Err(STORAGE_FULL);
+    }
     Ok(())
 }
 
@@ -453,4 +579,63 @@ fn checkpoint(conn: &Connection) {
     // secure_delete overwrites cells. Truncate the WAL to discard old frames too.
     // A busy reader can defer the checkpoint until the next sweep.
     let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_preserves_blobs_and_caps_existing_grants_at_share_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        let legacy = include_str!("schema.sql")
+            .replace(",\n    final_attempt_until INTEGER", "")
+            .replace(
+                "share_id BLOB NOT NULL,",
+                "share_id BLOB NOT NULL REFERENCES shares(id) ON DELETE CASCADE,",
+            );
+        let (tables, garbage) = legacy
+            .split_once("CREATE TABLE IF NOT EXISTS open_requests")
+            .unwrap();
+        let (_, garbage) = garbage
+            .split_once("CREATE TABLE IF NOT EXISTS blob_garbage")
+            .unwrap();
+        let garbage = garbage.replace(",\n    size INTEGER NOT NULL", "");
+        conn.execute_batch(&format!(
+            "{tables}CREATE TABLE IF NOT EXISTS blob_garbage{garbage}"
+        ))
+        .unwrap();
+
+        let id = [1_u8; 16];
+        let blob = [2_u8; 16];
+        let grant = [3_u8; 32];
+        conn.execute(
+            "INSERT INTO shares(id, expires_at, has_password, views_left, attempts_left, manifest)
+             VALUES (?1, 100, 0, 0, 1, x'010203')",
+            params![id],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO files VALUES (?1, 0, ?2, 4)", params![id, blob])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO grants VALUES (?1, ?2, 660)",
+            params![grant, id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Sqlite::open(&path).unwrap();
+        assert_eq!(storage_used(&store.connection().unwrap()).unwrap(), 7);
+        assert_eq!(store.live_blobs().unwrap(), HashSet::from([blob]));
+        assert_eq!(store.file(&id, 99, 0, Some(&grant)).unwrap().key, blob);
+        assert!(matches!(
+            store.file(&id, 100, 0, Some(&grant)),
+            Err(Error::Missing)
+        ));
+        store.sweep(100).unwrap();
+        assert!(store.live_blobs().unwrap().is_empty());
+        assert_eq!(storage_used(&store.connection().unwrap()).unwrap(), 4);
+    }
 }

@@ -33,7 +33,7 @@ pub(crate) enum Error {
     TooLarge,
     #[error("uploads must use contiguous file indices")]
     FileGap,
-    #[error("create rate limit exceeded")]
+    #[error("rate limit exceeded")]
     RateLimited { retry_after: i64 },
 }
 
@@ -70,6 +70,11 @@ pub(crate) struct Opened {
     pub views_left: u32,
 }
 
+pub(crate) struct OpenRequest {
+    pub tag: Secret32,
+    pub request_hash: Hash,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum UploadTarget {
     Manifest,
@@ -83,6 +88,7 @@ pub(crate) struct Upload {
     pub manifest_cap: u64,
     pub file_cap: u32,
     pub total_cap: u64,
+    pub storage_cap: u64,
 }
 
 pub(crate) struct Blob {
@@ -93,7 +99,8 @@ pub(crate) struct Blob {
 pub(crate) type Evaluate<'a> = dyn FnOnce(Option<&[u8]>) -> Result<[u8; 32]> + 'a;
 
 pub(crate) trait Metadata: Send + Sync {
-    fn create(&self, pending: &Pending) -> Result<()>;
+    fn check_storage(&self, storage_cap: u64) -> Result<()>;
+    fn create(&self, pending: &Pending, storage_cap: u64) -> Result<()>;
     fn check_pending_upload(&self, id: &ShareId, now: i64, hash: Option<&Hash>) -> Result<()>;
     fn upload_limit(&self, upload: &Upload, now: i64) -> Result<u64>;
     fn put_manifest(&self, upload: &Upload, now: i64, contents: &[u8]) -> Result<()>;
@@ -113,7 +120,13 @@ pub(crate) trait Metadata: Send + Sync {
     ) -> Result<()>;
     fn info(&self, id: &ShareId, now: i64) -> Result<ShareInfo>;
     fn eval(&self, id: &ShareId, now: i64, evaluate: Box<Evaluate<'_>>) -> Result<([u8; 32], u32)>;
-    fn open(&self, id: &ShareId, now: i64, tag: Result<Secret32>, grant: &Hash) -> Result<Opened>;
+    fn open(
+        &self,
+        id: &ShareId,
+        now: i64,
+        request: Result<OpenRequest>,
+        grant: &Hash,
+    ) -> Result<Opened>;
     fn file(&self, id: &ShareId, now: i64, n: u32, grant: Option<&Hash>) -> Result<Blob>;
     fn delete(&self, id: &ShareId, now: i64, owner: Option<&Secret32>) -> Result<()>;
     fn sweep(&self, now: i64) -> Result<()>;

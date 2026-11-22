@@ -30,7 +30,11 @@ impl RateLimiter {
         let limit = i64::from(self.limit);
         let capacity = HOUR * limit;
         let mut buckets = self.buckets.lock().map_err(|_| Error::Internal)?;
-        let bucket = buckets.entry(ip).or_insert(Bucket {
+        let network = match ip.to_canonical() {
+            IpAddr::V4(ip) => IpAddr::V4(ip),
+            IpAddr::V6(ip) => IpAddr::V6((u128::from(ip) & (u128::MAX << 64)).into()),
+        };
+        let bucket = buckets.entry(network).or_insert(Bucket {
             credits: capacity,
             updated: now,
         });

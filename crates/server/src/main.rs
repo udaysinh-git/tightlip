@@ -96,14 +96,7 @@ async fn run() -> Result<(), Error> {
             }
         })
     };
-    let result = axum::serve(
-        listener,
-        server
-            .router()
-            .into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await;
+    let result = server.serve(listener, shutdown).await;
     let _ = done.send(());
     let _ = sweeper.await;
     result?;

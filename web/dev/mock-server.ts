@@ -33,7 +33,8 @@ interface Stored {
   files: Buffer[];
   fileBytes: number;
   grants: { token: string; expiresAt: number }[];
-  burnedUntil?: number;
+  finalAttemptUntil?: number;
+  opens: Map<string, { viewsLeft: number; expiresAt: number }>;
 }
 
 class HttpError extends Error {
@@ -106,9 +107,10 @@ export async function createMockServer(moduleUrl: URL) {
   function find(id: string, now = clock()) {
     const share = shares.get(id);
     if (!share) return undefined;
-    const deadline = share.burnedUntil
-      ?? (share.uploadToken ? Math.min(share.expiresAt, share.pendingUntil) : share.expiresAt);
-    if (now >= deadline) {
+    const deadline = share.uploadToken ? Math.min(share.expiresAt, share.pendingUntil) : share.expiresAt;
+    share.grants = share.grants.filter((grant) => grant.expiresAt > now);
+    if (now >= deadline || ((!share.views || (share.finalAttemptUntil ?? Infinity) <= now)
+      && !share.grants.length)) {
       destroy(share);
       return undefined;
     }
@@ -132,13 +134,13 @@ export async function createMockServer(moduleUrl: URL) {
 
   function live(id: string): Stored {
     const share = find(id);
-    if (!share || share.uploadToken || share.burnedUntil) fail("not_found");
+    if (!share || share.uploadToken || !share.key) fail("not_found");
     return share;
   }
 
   function pending(request: IncomingMessage, id: string): Stored {
     const share = find(id);
-    if (!share || share.burnedUntil) fail("not_found");
+    if (!share) fail("not_found");
     if (!share.uploadToken) fail("conflict");
     if (!wasm.mock_compare_tokens(bearer(request), share.uploadToken)) fail("unauthorized");
     return share;
@@ -187,7 +189,7 @@ export async function createMockServer(moduleUrl: URL) {
     shares.set(id, {
       id, key, expiresAt: expires_at, pendingUntil: now + limits.pendingSeconds,
       uploadToken: upload_token, hasPassword: has_password, views: max_views,
-      attempts: max_views + (has_password ? 5 : 3), files: [], fileBytes: 0, grants: [],
+      attempts: max_views + (has_password ? 5 : 3), files: [], fileBytes: 0, grants: [], opens: new Map(),
     });
     json(response, 201, { id, evaluated, upload_token, expires_at });
   }
@@ -220,31 +222,37 @@ export async function createMockServer(moduleUrl: URL) {
     if (!base64url(blinded, 32) || !share.key) fail("bad_request");
     const evaluated = blindEvaluate(share.key, blinded);
     const attempts_left = --share.attempts;
-    if (attempts_left === 0) destroy(share);
+    if (attempts_left === 0) {
+      share.key.free();
+      share.key = undefined;
+      share.finalAttemptUntil = clock() + 120;
+    }
     json(response, 200, { evaluated, attempts_left });
   }
 
   async function open(request: IncomingMessage, response: ServerResponse, id: string) {
-    live(id);
-    const { access_tag } = await fields(request, "access_tag");
-    const share = live(id);
-    if (!base64url(access_tag, 32)) fail("bad_request");
-    if (!share.accessVerifier || !wasm.mock_verify_access(access_tag, share.accessVerifier)) fail("unauthorized");
-    if (!share.manifest) fail("not_found");
+    const { access_tag, request_id } = await fields(request, "access_tag", "request_id");
+    const now = clock();
+    const share = find(id, now);
+    if (!share?.manifest || !share.accessVerifier) fail("not_found");
+    const openable = share.views > 0 && (share.finalAttemptUntil ?? Infinity) > now;
+    const snapshot = typeof request_id === "string" ? share.opens.get(request_id) : undefined;
+    if (snapshot && snapshot.expiresAt <= now) fail("not_found");
+    const authorized = base64url(access_tag, 32) && wasm.mock_verify_access(access_tag, share.accessVerifier);
+    if (!openable && !(snapshot && authorized)) fail("not_found");
+    if (!base64url(access_tag, 32) || !base64url(request_id, 16)) fail("bad_request");
+    if (!authorized) fail("unauthorized");
     const manifest = share.manifest.toString("base64url");
     const files = share.files.map((blob, n) => ({ n, size: blob.length }));
     const grant = wasm.mock_random_token();
-    const now = clock();
-    share.grants = share.grants.filter((entry) => entry.expiresAt > now);
-    share.grants.push({ token: grant, expiresAt: now + limits.grantSeconds });
-    if (--share.views === 0) {
+    const opened = snapshot ?? { viewsLeft: --share.views, expiresAt: Math.min(share.expiresAt, now + limits.grantSeconds) };
+    share.opens.set(request_id, opened);
+    share.grants.push({ token: grant, expiresAt: opened.expiresAt });
+    if (share.views === 0) {
       share.key?.free();
       share.key = undefined;
-      share.manifest = undefined;
-      share.burnedUntil = now + limits.grantSeconds;
-      if (!share.files.length) destroy(share);
     }
-    json(response, 200, { manifest, files, grant, views_left: share.views });
+    json(response, 200, { manifest, files, grant, views_left: opened.viewsLeft });
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse, tail: string) {
@@ -280,9 +288,14 @@ export async function createMockServer(moduleUrl: URL) {
       const share = find(id);
       if (!share?.ownerVerifier) fail("not_found");
       if (!wasm.mock_verify_owner(bearer(request), share.ownerVerifier)) {
-        fail(share.burnedUntil ? "not_found" : "unauthorized");
+        fail("unauthorized");
       }
-      destroy(share);
+      share.key?.free();
+      share.key = undefined;
+      share.views = 0;
+      share.manifest = share.ownerVerifier = share.accessVerifier = undefined;
+      share.opens.clear();
+      if (!share.grants.length) destroy(share);
       return noContent(response);
     }
     if (index !== undefined && (method === "PUT" || method === "GET")) {
@@ -294,7 +307,7 @@ export async function createMockServer(moduleUrl: URL) {
       if (!share || share.uploadToken) fail("not_found");
       const token = bearer(request);
       const valid = share.grants.some((grant) => grant.expiresAt > now && wasm.mock_compare_tokens(token, grant.token));
-      if (!valid) fail(share.burnedUntil ? "not_found" : "unauthorized");
+      if (!valid) fail(share.key ? "unauthorized" : "not_found");
       const file = share.files[n];
       if (!file) fail("not_found");
       response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": file.length });

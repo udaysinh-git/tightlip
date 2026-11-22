@@ -60,7 +60,7 @@ export function Compose(props: { client: CryptoClient }) {
       if (old.length + incoming.length > limits.files
         || [...old.map((item) => item.file), ...incoming].reduce((size, file) => size + file.size, 0)
           > limits.ciphertext) {
-        feedback.notify("These files exceed the share limit. Pick up to 20 files totalling less than 100 MB.", true);
+        feedback.notify("These files exceed the share limit. Pick up to 20 files totalling less than 25 MB.", true);
         return;
       }
       feedback.notify("");

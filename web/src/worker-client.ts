@@ -2,7 +2,7 @@ import { workerScript } from "./trusted-types";
 import type { Operation, Operations, Progress, Reply, Request, Result } from "./worker-protocol";
 
 export class WorkerError extends Error {
-  constructor(message: string, readonly usedView: boolean, readonly wrongPassword = false) {
+  constructor(message: string, readonly usedView: boolean, readonly attemptsLeft?: number) {
     super(message);
   }
 }
@@ -28,7 +28,7 @@ export class CryptoClient {
         return;
       }
       this.#pending.delete(data.id);
-      if ("error" in data) pending.reject(new WorkerError(data.error, data.usedView, data.wrongPassword));
+      if ("error" in data) pending.reject(new WorkerError(data.error, data.usedView, data.attemptsLeft));
       else pending.resolve(data.result);
     };
     worker.onerror = worker.onmessageerror = () => this.close();

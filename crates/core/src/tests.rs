@@ -385,6 +385,7 @@ fn manifest_and_files_round_trip_with_bound_context() {
         name: "fixture.bin".into(),
         mime: "application/octet-stream".into(),
         size: data.len() as u64,
+        orientation: None,
         key: Secret32::generate().unwrap(),
     };
     let mut login = Login::default();
@@ -515,6 +516,7 @@ fn file_open_enforces_minimum_true_size_and_truncates() {
         name: "fixture.bin".into(),
         mime: "application/octet-stream".into(),
         size: 3,
+        orientation: None,
         key: sample_key(),
     };
     let wire = manifest::seal_file(&id, 0, &entry, b"abc").unwrap();

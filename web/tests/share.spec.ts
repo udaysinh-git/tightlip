@@ -142,7 +142,7 @@ test("text renders as text after a click and the final view burns the share", as
     await expect(recipient.locator("pre")).toHaveCount(0);
     await recipient.getByRole("button", { name: "Break the seal" }).click();
     await expect(recipient.locator("pre")).toHaveText(text);
-    await expect(recipient.getByText("This was the last view. It's gone from the server.")).toBeVisible();
+    await expect(recipient.getByText("This was the last view.")).toBeVisible();
     await expectNoHorizontalOverflow(recipient);
     await recipient.getByRole("button", { name: "Close share" }).click();
     await expect(recipient.getByText("Nothing here. The link has burned or expired.")).toBeVisible();
@@ -177,7 +177,7 @@ test("protected login accepts a correct password and allows the owner to delete 
     await expect(recipient.getByText("Someone sealed this for you. 3 views left.")).toBeVisible();
     await recipient.getByLabel("Share password").fill("Wrong password");
     await recipient.getByRole("button", { name: "Break the seal" }).click();
-    await expect(recipient.getByRole("alert")).toContainText("Check the password");
+    await expect(recipient.getByRole("alert")).toContainText("Wrong password. 7 tries left before this burns.");
     const metadata = await context.request.get(`${link.origin}/api/v1/shares/${link.pathname.slice(3)}`);
     expect((await metadata.json()).views_left).toBe(3);
     await recipient.getByLabel("Share password").fill(sharePassword);

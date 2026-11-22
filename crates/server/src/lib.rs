@@ -2,6 +2,7 @@
 
 mod api;
 pub mod config;
+mod connection;
 mod credentials;
 mod file_body;
 mod rate;
@@ -9,6 +10,8 @@ mod storage;
 mod web;
 
 use std::{
+    future::Future,
+    io,
     path::PathBuf,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -21,8 +24,10 @@ use tightlip_core::{
     oprf::{self, ServerKey},
     share::{self, ShareId},
 };
+use tokio::sync::Semaphore;
 
 use config::{Config, Limits};
+use connection::Peer;
 use rate::RateLimiter;
 use storage::{Blobs, Error, Metadata, Result, disk::Disk, sqlite::Sqlite};
 
@@ -63,6 +68,7 @@ struct State {
     trust_proxy: bool,
     limits: Limits,
     rate: RateLimiter,
+    uploads: Arc<Semaphore>,
     web_dir: PathBuf,
 }
 
@@ -93,12 +99,26 @@ impl Server {
             trust_proxy: config.trust_proxy,
             limits: config.limits,
             rate: RateLimiter::new(config.limits.creates_per_ip),
+            uploads: Arc::new(Semaphore::new(8)),
             web_dir: config.web_dir,
         })))
     }
 
     pub fn router(&self) -> Router {
         api::router(self.clone())
+    }
+
+    pub async fn serve(
+        &self,
+        listener: tokio::net::TcpListener,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> io::Result<()> {
+        axum::serve(
+            connection::CappedListener::new(listener),
+            self.router().into_make_service_with_connect_info::<Peer>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
     }
 
     pub async fn sweep(&self) -> std::result::Result<(), ServerError> {

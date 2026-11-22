@@ -13,7 +13,7 @@ Out of scope for part 1: a recipient who copies the plaintext after a legitimate
 Security goals when the server is honest:
 
 1. A share cannot be read after its expiry or after its last view, even by someone who holds the full link and a copy of the ciphertext taken earlier, unless they also completed an OPRF evaluation while the share was live.
-2. Guessing a share password requires one request to the server per guess, and the server destroys the share after a fixed number of evaluations.
+2. Guessing a share password requires one request to the server per guess, and the server destroys the OPRF key after a fixed number of evaluations.
 3. A database or disk backup taken without the server's key encryption key reveals no OPRF keys.
 
 ## 2. Conventions
@@ -153,7 +153,7 @@ The manifest is UTF-8 JSON:
 }
 ```
 
-`note`, `login` and `files` are each optional, and at least one is present. Every field of `login` is optional. `size` is the true length before padding. `key` is a fresh random file key.
+`note`, `login` and `files` are each optional. A valid manifest contains a nonempty note, a login with at least one field, or a nonempty file list. Every field of `login` is optional. `size` is the true length before padding. `key` is a fresh random file key. A file entry can include `orientation`, a JPEG EXIF orientation integer from 1 to 8. The client omits it when absent and rejects values outside that range.
 
 ```
 manifest_ct = seal(manifest_key, "tightlip/v1/manifest" || share_id, pad(manifest_json))
@@ -174,7 +174,7 @@ k_wrapped = seal(KEK, "tightlip/v1/oprf-key" || share_id, k)
 
 All paths are under `/api/v1`. JSON bodies are small and capped at 16 kB. Binary bodies are `application/octet-stream`. Every API response carries `Cache-Control: no-store`.
 
-A share is in one of two states: pending (created, content not yet committed) or live. A share that is missing, expired, burned or still pending answers every recipient request with the same `404` and the same body, in the same time.
+A share starts pending (created, content not yet committed) and becomes live on commit. Subject to the final attempt, replay and grant rules below, missing, expired, burned and pending shares answer recipient requests with the same `404` and the same body, in the same time.
 
 | Request | Body | Effect |
 | --- | --- | --- |
@@ -183,9 +183,9 @@ A share is in one of two states: pending (created, content not yet committed) or
 | `PUT /shares/{id}/files/{n}` | `file_ct[n]`, streamed | Same auth. `n` counts from 0 with no gaps. |
 | `POST /shares/{id}/commit` | `{access_verifier, owner_verifier}` | Same auth. Makes the share live and invalidates the upload token. |
 | `GET /shares/{id}` | none | Returns `{suite, has_password, expires_at, views_left}`. Changes nothing. |
-| `POST /shares/{id}/eval` | `{blinded}` | Spends one attempt. Returns `{evaluated, attempts_left}`. When attempts reach zero the share is destroyed. |
-| `POST /shares/{id}/open` | `{access_tag}` | If the tag matches the verifier and a view remains, spends one view atomically and returns `{manifest, files: [{n, size}], grant, views_left}`, where `views_left` is the count after this view. A wrong tag returns `401` and spends nothing. |
-| `GET /shares/{id}/files/{n}` | none | Needs `Authorization: Bearer <grant>`. A grant lasts 10 minutes. |
+| `POST /shares/{id}/eval` | `{blinded}` | Spends one attempt. Returns `{evaluated, attempts_left}`, including the evaluation that brings attempts to zero. At zero the server immediately deletes the wrapped OPRF key. Metadata and further evaluations return `404`. An open with a correct tag can still spend a remaining view for 120 seconds, bounded by the original share expiry. |
+| `POST /shares/{id}/open` | `{access_tag, request_id}` | If the tag matches the verifier and a view remains, spends one view atomically and returns `{manifest, files: [{n, size}], grant, views_left}`, where `views_left` is the count after this view. Within the grant window, the same request ID and correct tag return the same manifest, file list and view count with a fresh grant token for the rest of that window. A wrong tag on a share available for a new open returns `401` and spends nothing. Once a share is spent, only an authenticated replay can open it. Other open requests return `404`. |
+| `GET /shares/{id}/files/{n}` | none | Needs `Authorization: Bearer <grant>`. The grant window lasts 10 minutes from the first open, bounded by the original share expiry. |
 | `DELETE /shares/{id}` | none | Needs `Authorization: Bearer <b64url(owner_token)>`. Destroys the share. |
 
 Limits, all configurable by environment with these defaults:
@@ -197,13 +197,18 @@ Limits, all configurable by environment with these defaults:
 | Attempts | `max_views + 5` with a password, `max_views + 3` without |
 | Manifest ciphertext | 256 kB |
 | Files per share | 20 |
-| Total ciphertext per share | 100 MB |
+| Total ciphertext per share (`TIGHTLIP_TOTAL_CIPHERTEXT_BYTES`) | 25 MB |
+| Global blob and manifest ciphertext (`TIGHTLIP_STORAGE_BYTES`) | 5 GB |
 | Pending share lifetime | 15 minutes |
 | Creates per IP | 30 per hour, token bucket held in memory only |
 
-Destroying a share means, in this order: delete the wrapped OPRF key, delete the row, unlink the blobs. When the last view is spent the OPRF key and manifest go at once, and the file blobs go when the grant expires. A sweeper destroys expired and stale pending shares at least once a minute, and every request checks expiry itself so the sweeper's timing does not matter for correctness.
+The server stores the SHA-256 hash of each successful request ID per share with the grant window and open's view count. Reuse of that ID after its grant window returns `404`. When the last view is spent, the server deletes the wrapped OPRF key immediately and retains the manifest for retries until the last grant expires. After the final attempt window closes, only authenticated replays and granted downloads remain available.
+
+Destroying a share means, in this order: delete the wrapped OPRF key, delete the row, unlink the blobs. A sweeper destroys expired and stale pending shares at least once a minute, and every request checks expiry itself so the sweeper's timing does not matter for correctness.
 
 The server never logs a share id together with an IP address, never logs request bodies, tokens or tags, and does not persist IP addresses.
+
+The server checks the global ciphertext cap in the transactions that admit creates and uploads. A create at or above the cap, or an upload that would exceed it, returns `429 rate_limited` with `Retry-After: 600`.
 
 ### 7.1 Wire conventions
 
@@ -214,6 +219,7 @@ Both the server and the web client build to these rules. Where this subsection a
 | `{id}` in paths and `id` in JSON | base64url of the 16 byte share id (22 characters) |
 | `blinded`, `evaluated`, `access_tag`, `access_verifier`, `owner_verifier` | base64url of 32 bytes |
 | `upload_token`, `grant` | base64url of 32 random bytes |
+| `request_id` | base64url of 16 random bytes. A client generates it once per reveal and reuses it when retrying the open. |
 | `manifest` in the `open` response | base64url of `manifest_ct` |
 | `expires_at` | integer, Unix seconds |
 | `suite` | the string `tightlip-v1` |
@@ -231,7 +237,7 @@ Errors return JSON `{"error": "<code>"}` with exactly these pairs:
 | 404 | `not_found` | every missing, expired, burned or pending share on a recipient route, and unknown routes |
 | 409 | `conflict` | file index out of order on a pending share. Uploads and commits on a share that is already committed return `404`, since its upload token no longer exists. |
 | 413 | `too_large` | a size or count limit |
-| 429 | `rate_limited` | the create limit, with a `Retry-After` header in seconds |
+| 429 | `rate_limited` | the create limit or the global ciphertext cap, with a `Retry-After` header in seconds |
 
 ### 7.2 Static routes
 
@@ -251,7 +257,7 @@ The web client reads the share id from the path and the link secret from the fra
 The web app is a static bundle with content hashed file names. The server sends these headers on every response:
 
 ```
-Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; media-src blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'
+Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; media-src blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types tightlip-templates tightlip-worker
 Referrer-Policy: no-referrer
 X-Content-Type-Options: nosniff
 Cross-Origin-Opener-Policy: same-origin

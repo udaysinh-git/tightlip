@@ -5,7 +5,7 @@ export const limits = {
   json: 16_000,
   manifest: 256_000,
   files: 20,
-  ciphertext: 100_000_000,
+  ciphertext: 25_000_000,
   ttlMin: 300,
   ttlMax: 2_592_000,
   viewsMax: 100,

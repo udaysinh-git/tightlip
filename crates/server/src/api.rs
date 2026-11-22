@@ -1,11 +1,11 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{BodyDataStream, Bytes},
     extract::{ConnectInfo, FromRequestParts, MatchedPath, Path, Request},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header, request::Parts},
     middleware::{self, Next},
@@ -14,28 +14,39 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize, Serializer, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use tightlip_core::{
     Secret32, b64, labels,
     oprf::ServerKey,
     share::{self, ShareId, Verifier},
 };
-use tokio::io::AsyncWriteExt;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::OwnedSemaphorePermit,
+    time::{Instant as Deadline, timeout_at},
+};
 use zeroize::Zeroizing;
 
 use crate::{
-    Server, State,
+    Peer, Server, State,
     credentials::{bearer, deserialize_secret, token_hash},
-    storage::{Blob, Error, FileInfo, Pending, Result, ShareInfo, Upload, UploadTarget},
+    storage::{
+        Blob, Error, FileInfo, OpenRequest, Pending, Result, ShareInfo, Upload, UploadTarget,
+    },
     web,
 };
 
 const JSON_CAP: u64 = 16_000;
 const BINARY: &str = "application/octet-stream";
+const UPLOAD_IDLE: Duration = Duration::from_secs(30);
+const UPLOAD_TIME: Duration = Duration::from_secs(15 * 60);
+const JSON_TIME: Duration = Duration::from_secs(10);
 const CSP: &str = concat!(
     "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; ",
     "img-src 'self' blob:; media-src blob:; font-src 'self'; connect-src 'self'; ",
     "worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; ",
-    "frame-ancestors 'none'; require-trusted-types-for 'script'",
+    "frame-ancestors 'none'; require-trusted-types-for 'script'; ",
+    "trusted-types tightlip-templates tightlip-worker",
 );
 const SECURITY_HEADERS: [(&str, &str); 8] = [
     ("content-security-policy", CSP),
@@ -186,6 +197,7 @@ async fn create(
     server
         .run(move |state| {
             let now = state.clock.now();
+            state.meta.check_storage(limits.storage_bytes)?;
             state.rate.spend(ip, now)?;
             let key = ServerKey::generate().map_err(|_| Error::Internal)?;
             let evaluated = key.blind_evaluate(&blinded).map_err(|_| Error::Invalid)?;
@@ -208,7 +220,7 @@ async fn create(
                 upload_hash: token_hash(&upload_token),
                 wrapped_key,
             };
-            state.meta.create(&pending)?;
+            state.meta.create(&pending, limits.storage_bytes)?;
             Ok((
                 StatusCode::CREATED,
                 Json(Created {
@@ -227,12 +239,19 @@ async fn manifest(
     ApiPath(id): ApiPath<String>,
     request: Request,
 ) -> Result<StatusCode> {
+    let permit = upload_permit(&server)?;
+    let deadline = Deadline::now() + UPLOAD_TIME;
     let target = require_type(request.headers(), BINARY).map(|()| UploadTarget::Manifest);
-    let (upload, cap) = prepare_upload(&server, &id, target, request.headers()).await?;
+    let (upload, cap) = timeout_at(
+        deadline,
+        prepare_upload(&server, &id, target, request.headers()),
+    )
+    .await
+    .map_err(|_| Error::Invalid)??;
     let mut body = request.into_body().into_data_stream();
     let mut data = Vec::new();
     let mut size = 0;
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = upload_chunk(&mut body, deadline).await? {
         let chunk = checked_chunk(chunk, &mut size, cap)?;
         data.extend_from_slice(&chunk);
     }
@@ -240,7 +259,11 @@ async fn manifest(
         return Err(Error::Invalid);
     }
     server
-        .run(move |state| state.meta.put_manifest(&upload, state.clock.now(), &data))
+        .run(move |state| {
+            let _permit = permit;
+            check_upload_deadline(deadline)?;
+            state.meta.put_manifest(&upload, state.clock.now(), &data)
+        })
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -250,37 +273,82 @@ async fn put_file(
     ApiPath((id, n)): ApiPath<(String, String)>,
     request: Request,
 ) -> Result<StatusCode> {
+    let permit = upload_permit(&server)?;
+    let deadline = Deadline::now() + UPLOAD_TIME;
     let target = require_type(request.headers(), BINARY)
         .and_then(|()| file_index(&n))
         .map(UploadTarget::File);
-    let (upload, cap) = prepare_upload(&server, &id, target, request.headers()).await?;
-    let mut stage = server.run(|state| state.blobs.stage()).await?;
+    let (upload, cap) = timeout_at(
+        deadline,
+        prepare_upload(&server, &id, target, request.headers()),
+    )
+    .await
+    .map_err(|_| Error::Invalid)??;
+    let mut stage = timeout_at(deadline, server.run(|state| state.blobs.stage()))
+        .await
+        .map_err(|_| Error::Invalid)??;
     let mut body = request.into_body().into_data_stream();
     let mut size = 0;
     let mut writer = stage.writer()?;
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = upload_chunk(&mut body, deadline).await? {
         let chunk = checked_chunk(chunk, &mut size, cap)?;
-        writer.write_all(&chunk).await?;
+        timeout_at(deadline, writer.write_all(&chunk))
+            .await
+            .map_err(|_| Error::Invalid)??;
     }
     if size == 0 {
         return Err(Error::Invalid);
     }
-    writer.shutdown().await?;
+    timeout_at(deadline, writer.shutdown())
+        .await
+        .map_err(|_| Error::Invalid)??;
     server
         .run(move |state| {
+            let _permit = permit;
+            check_upload_deadline(deadline)?;
             let blob = Blob {
                 key: stage.key(),
                 size,
             };
             state
                 .meta
-                .put_file(&upload, state.clock.now(), &blob, &mut || stage.publish())?;
+                .put_file(&upload, state.clock.now(), &blob, &mut || {
+                    check_upload_deadline(deadline)?;
+                    stage.publish()?;
+                    check_upload_deadline(deadline)
+                })?;
             stage.keep();
             let _ = state.meta.collect_garbage(&*state.blobs);
             Ok(())
         })
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn upload_permit(server: &Server) -> Result<OwnedSemaphorePermit> {
+    server
+        .0
+        .uploads
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| Error::RateLimited { retry_after: 5 })
+}
+
+async fn upload_chunk(
+    body: &mut BodyDataStream,
+    deadline: Deadline,
+) -> Result<Option<std::result::Result<Bytes, axum::Error>>> {
+    check_upload_deadline(deadline)?;
+    timeout_at(deadline.min(Deadline::now() + UPLOAD_IDLE), body.next())
+        .await
+        .map_err(|_| Error::Invalid)
+}
+
+fn check_upload_deadline(deadline: Deadline) -> Result<()> {
+    if Deadline::now() >= deadline {
+        return Err(Error::Invalid);
+    }
+    Ok(())
 }
 
 async fn prepare_upload(
@@ -304,6 +372,7 @@ async fn prepare_upload(
                 manifest_cap: u64::from(state.limits.manifest_bytes),
                 file_cap: state.limits.files_per_share,
                 total_cap: state.limits.total_ciphertext_bytes,
+                storage_cap: state.limits.storage_bytes,
             };
             let cap = state.meta.upload_limit(&upload, now)?;
             Ok((upload, cap))
@@ -389,9 +458,6 @@ async fn eval(
                     evaluated.map_err(|_| Error::Invalid)
                 }),
             )?;
-            if attempts_left == 0 {
-                let _ = state.meta.collect_garbage(&*state.blobs);
-            }
             Ok(Json(Evaluated {
                 evaluated: b64::encode(&evaluated),
                 attempts_left,
@@ -405,6 +471,7 @@ async fn eval(
 struct Open {
     #[serde(deserialize_with = "deserialize_secret")]
     access_tag: Secret32,
+    request_id: String,
 }
 
 #[derive(Serialize)]
@@ -422,13 +489,19 @@ async fn open(
     request: Request,
 ) -> Result<Json<OpenResponse>> {
     let id = decode(&id).ok_or(Error::Invalid)?;
-    let tag = json::<Open>(request).await.map(|body| body.access_tag);
+    let request = json::<Open>(request).await.and_then(|body| {
+        let id = decode::<16>(&body.request_id).ok_or(Error::Invalid)?;
+        Ok(OpenRequest {
+            tag: body.access_tag,
+            request_hash: Sha256::digest(id).into(),
+        })
+    });
     server
         .run(move |state| {
             let grant = Secret32::generate().map_err(|_| Error::Internal)?;
             let opened = state
                 .meta
-                .open(&id, state.clock.now(), tag, &token_hash(&grant))?;
+                .open(&id, state.clock.now(), request, &token_hash(&grant))?;
             Ok(Json(OpenResponse {
                 manifest: b64::encode(&opened.manifest),
                 files: opened.files,
@@ -502,7 +575,12 @@ async fn json<T: DeserializeOwned>(request: Request) -> Result<T> {
     let mut data = Zeroizing::new(Vec::with_capacity(JSON_CAP as usize));
     let mut body = request.into_body().into_data_stream();
     let mut size = 0;
-    while let Some(chunk) = body.next().await {
+    let deadline = Deadline::now() + JSON_TIME;
+    while let Some(chunk) = timeout_at(deadline, body.next())
+        .await
+        .map_err(|_| Error::Invalid)?
+    {
+        check_upload_deadline(deadline)?;
         let chunk = checked_chunk(chunk, &mut size, JSON_CAP)?;
         data.extend_from_slice(&chunk);
     }
@@ -555,11 +633,16 @@ fn client_ip(state: &State, request: &Request) -> IpAddr {
         .flatten();
     forwarded
         .or_else(|| {
-            request
-                .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|info| info.0.ip())
+            let extensions = request.extensions();
+            extensions
+                .get::<ConnectInfo<Peer>>()
+                .map(|ConnectInfo(Peer(address))| *address)
+                .or_else(|| {
+                    extensions
+                        .get::<ConnectInfo<SocketAddr>>()
+                        .map(|info| info.0)
+                })
+                .map(|address| address.ip())
         })
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
-        .to_canonical()
 }

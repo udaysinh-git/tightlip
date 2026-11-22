@@ -67,6 +67,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
   const [invalid, setInvalid] = createSignal(false);
   const [animate, setAnimate] = createSignal(false);
   const [gone, setGone] = createSignal(false);
+  const [unread, setUnread] = createSignal(false);
   const [priorCount, setPriorCount] = createSignal(0);
   const [keyless, setKeyless] = createSignal(false);
   const feedback = createFeedback();
@@ -149,18 +150,20 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
     } catch (cause) {
       if (departed) return;
       const problem = message(cause);
-      const wrong = cause instanceof WorkerError && cause.wrongPassword;
+      const attempts = cause instanceof WorkerError ? cause.attemptsLeft : undefined;
+      const wrong = attempts !== undefined;
       flush(() => {
-        if (problem === unavailable || (cause instanceof WorkerError && cause.usedView)) {
+        if (attempts === 0 || problem === unavailable || (cause instanceof WorkerError && cause.usedView)) {
           setMetadata(undefined);
           setPassword("");
-          setGone(true);
+          if (cause instanceof WorkerError && cause.usedView) setUnread(true);
+          else setGone(true);
         }
         setInvalid(wrong);
         setBusy(false);
         if (problem !== unavailable) feedback.notify(problem, true);
       });
-      if (wrong) passwordError(field, pointer);
+      if (wrong && attempts !== 0) passwordError(field, pointer);
     } finally {
       revealing = false;
       setBusy(false);
@@ -241,6 +244,10 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
                   <RevealedAttachment file={file} animate={animate()} />
                 )}</For></ul>
               </Show>
+              <Show when={content.failedFiles.length > 0}>
+                <p role="status">A view was used. These files could not be read.</p>
+                <ul><For each={content.failedFiles}>{(name) => <li>{name}</li>}</For></ul>
+              </Show>
             </TextReveal>
           </div>
           <Show when={content.viewsLeft !== undefined}>
@@ -248,7 +255,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
               <p class="sentence" role="status"><Show when={content.viewsLeft === 0} fallback={
                 <><RollingCounter count={content.viewsLeft ?? 0} previous={priorCount()} animate={animate()} />
                   {" "}{content.viewsLeft === 1 ? "view" : "views"} left.</>
-              }>This was the last view. It's gone from the server.</Show></p>
+              }>This was the last view.</Show></p>
               <Show when={content.viewsLeft === 0}>
                 <IconButton icon="remove" label="Close share" onClick={closeLastView} />
               </Show>
@@ -265,7 +272,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
         <p class="paper folded-paper quiet-paper" role="status">This page no longer holds the key. Open the link you were sent again. Nothing has been used up.</p>
       </Show>
       <Show when={!metadata() && !opened() && !loading() && !keyless()}>
-        <Show when={!gone()}><p class="paper folded-paper quiet-paper">Could not check this link.</p></Show>
+        <Show when={!gone() && !unread()}><p class="paper folded-paper quiet-paper">Could not check this link.</p></Show>
         <Feedback feedback={feedback} />
       </Show>
     </section>

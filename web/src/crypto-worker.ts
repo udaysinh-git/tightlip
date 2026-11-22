@@ -3,8 +3,8 @@ import init, {
 } from "tightlip-wasm/client";
 import type { Draft, OpenedManifest, ShareSession } from "tightlip-wasm/client";
 import {
-  ApiError, commitShare, createShare, deleteShare, downloadFile, evaluate, getMetadata,
-  openShare, unavailable, uploadFile, uploadManifest,
+  ApiError, NetworkError, commitShare, createShare, deleteShare, downloadFile, evaluate, getMetadata,
+  openShare, retryNetwork, unavailable, uploadFile, uploadManifest,
 } from "./api";
 import { scrubType, supportedImage } from "./image-types";
 import { limits, shareId } from "./wire";
@@ -16,9 +16,15 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 const sliceSize = 64 * 1024;
 let ready: ReturnType<typeof init> | undefined;
 let owned: { id: string; token: OwnerToken } | undefined;
-let recipient: { id: string; secret: LinkSecret; hasPassword: boolean } | undefined;
+let recipient: { id: string; secret: LinkSecret; hasPassword: boolean; expiresAt: number } | undefined;
 
 class UsedViewError extends Error {}
+class WrongPasswordError extends Error {
+  constructor(readonly attemptsLeft: number) {
+    super(attemptsLeft === 0 ? "Wrong password. The share has burned."
+      : `Wrong password. ${attemptsLeft} tries left before this burns.`);
+  }
+}
 
 async function sealFile(session: ShareSession, draft: Draft, file: File): Promise<Blob> {
   let source: Blob = file;
@@ -145,8 +151,9 @@ async function fetchFile(
     if (bytes.length) parts.push(new Blob([bytes]));
     bytes.fill(0);
   }
+  const read = () => reader.read().catch(() => { throw new NetworkError(); });
   try {
-    for (let streamed = await reader.read(); !streamed.done; streamed = await reader.read()) {
+    for (let streamed = await read(); !streamed.done; streamed = await read()) {
       let bytes = streamed.value;
       received += bytes.length;
       if (received > expected) throw new Error("Could not decrypt the share.");
@@ -162,7 +169,8 @@ async function fetchFile(
         append(opened.update(bytes.subarray(offset, offset + sliceSize)));
       }
     }
-    if (!opened || received !== expected) throw new Error("Could not decrypt the share.");
+    if (received !== expected) throw new NetworkError();
+    if (!opened) throw new Error("Could not decrypt the share.");
     const final = opened;
     opened = undefined;
     append(final.finish());
@@ -176,42 +184,64 @@ async function fetchFile(
 
 async function reveal(password: string | undefined): Promise<Revealed> {
   if (!recipient) throw new Error(unavailable);
-  const { id, secret, hasPassword } = recipient;
+  const { id, secret, hasPassword, expiresAt } = recipient;
   const exchange = secret.start(hasPassword ? password : undefined);
-  let evaluated: string;
+  let evaluation: Awaited<ReturnType<typeof evaluate>>;
   try {
-    ({ evaluated } = await evaluate(id, exchange.blinded()));
+    evaluation = await evaluate(id, exchange.blinded());
   } catch (error) {
     exchange.free();
     throw error;
   }
-  const session = exchange.finish(evaluated, id);
+  const session = exchange.finish(evaluation.evaluated, id);
   try {
     let usedView = false;
     try {
+      const grantDeadline = Math.min(expiresAt * 1000, Date.now() + limits.grantSeconds * 1000);
       const { manifest, files, grant, views_left: viewsLeft } = await openShare(id, session.access_tag(), () => {
-        usedView = true;
-        secret.free();
-        recipient = undefined;
+        if (!usedView) {
+          usedView = true;
+          secret.free();
+          recipient = undefined;
+        }
       });
       const opened = session.open_manifest(manifest, files.length);
       try {
         const content = JSON.parse(opened.visible_content()) as Content & { files: VisibleFile[] };
         const decrypted: Revealed["files"] = [];
+        const failedFiles: string[] = [];
         for (const { n, size } of files) {
           const entry = content.files[n];
           if (!entry) throw new Error("Could not decrypt the share.");
-          const blob = await fetchFile(id, grant, entry, n, size, opened);
-          decrypted.push({ ...entry, blob });
+          try {
+            const blob = await retryNetwork(() => fetchFile(id, grant, entry, n, size, opened), grantDeadline);
+            decrypted.push({ ...entry, blob });
+          } catch {
+            failedFiles.push(entry.name);
+          }
         }
-        return { note: content.note, login: content.login, files: decrypted, viewsLeft };
+        return { note: content.note, login: content.login, files: decrypted, failedFiles, viewsLeft };
       } finally {
         opened.free();
       }
     } catch (error) {
-      if (!usedView) throw error;
+      if (!usedView) {
+        if (hasPassword && error instanceof ApiError && error.code === "unauthorized") {
+          if (evaluation.attempts_left === 0) {
+            secret.free();
+            recipient = undefined;
+          }
+          throw new WrongPasswordError(evaluation.attempts_left);
+        }
+        if (error instanceof NetworkError) {
+          secret.free();
+          recipient = undefined;
+          throw new UsedViewError("The server may have used a view. The connection failed before the contents could be read.");
+        }
+        throw error;
+      }
       const detail = error instanceof ApiError ? ` ${error.message}` : " Ask the sender for a new link.";
-      throw new UsedViewError(`A view was used, but the contents could not be read.${detail}`);
+      throw new UsedViewError(`A view was used. The contents could not be read.${detail}`);
     }
   } finally {
     session.free();
@@ -264,7 +294,7 @@ scope.onmessage = async ({ data }: MessageEvent<Request>) => {
         try {
           const metadata = await getMetadata(parsed);
           recipient?.secret.free();
-          recipient = { id: parsed, secret, hasPassword: metadata.has_password };
+          recipient = { id: parsed, secret, hasPassword: metadata.has_password, expiresAt: metadata.expires_at };
           result = metadata;
         } catch (error) {
           secret.free();
@@ -280,8 +310,7 @@ scope.onmessage = async ({ data }: MessageEvent<Request>) => {
   } catch (error) {
     reply({ id, error: error instanceof Error ? error.message : "The action failed. Try again.",
       usedView: error instanceof UsedViewError,
-      wrongPassword: operation === "reveal" && recipient?.hasPassword === true
-        && error instanceof ApiError && error.code === "unauthorized" });
+      attemptsLeft: error instanceof WrongPasswordError ? error.attemptsLeft : undefined });
   } finally {
     processing = false;
   }

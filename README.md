@@ -105,7 +105,8 @@ The following variables override the share limits.
 | `TIGHTLIP_ATTEMPTS` | `5:3` (extra attempts with and without a password) |
 | `TIGHTLIP_MANIFEST_BYTES` | `256000` |
 | `TIGHTLIP_FILES_PER_SHARE` | `20` |
-| `TIGHTLIP_TOTAL_CIPHERTEXT_BYTES` | `100000000` |
+| `TIGHTLIP_TOTAL_CIPHERTEXT_BYTES` | `25000000` |
+| `TIGHTLIP_STORAGE_BYTES` | `5000000000` |
 | `TIGHTLIP_PENDING_LIFETIME_SECONDS` | `900` |
 | `TIGHTLIP_CREATES_PER_IP` | `30` per hour |
 

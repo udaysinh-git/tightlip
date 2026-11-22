@@ -4,6 +4,7 @@ use js_sys::Uint8Array;
 use thiserror::Error;
 use tightlip_core::{
     Secret32, b64,
+    manifest::{self, FileEntry, Manifest},
     share::{self, ShareId},
     stream::HEADER_LEN,
 };
@@ -148,19 +149,21 @@ impl ShareSession {
     }
 
     pub fn draft(&self, content: String) -> Result<Draft, JsValue> {
-        Ok(Draft(payload::Manifest::from_content(Zeroizing::new(
-            content,
-        ))?))
+        Ok(Draft(payload::from_content(Zeroizing::new(content))?))
     }
 
     pub fn seal_manifest(&self, draft: &Draft) -> Result<Vec<u8>, JsValue> {
-        Ok(draft.0.seal(&self.keys.manifest_key, &self.id)?)
+        Ok(
+            manifest::seal_manifest(&self.keys.manifest_key, &self.id, &draft.0)
+                .map_err(|_| Error::Prepare)?,
+        )
     }
 
     pub fn open_manifest(&self, encoded: &str, count: usize) -> Result<OpenedManifest, JsValue> {
         let ciphertext = b64::decode(encoded).map_err(|_| Error::Open)?;
         let manifest =
-            payload::Manifest::open(&self.keys.manifest_key, &self.id, &ciphertext, count)?;
+            manifest::open_manifest(&self.keys.manifest_key, &self.id, &ciphertext, count)
+                .map_err(|_| Error::Open)?;
         Ok(OpenedManifest {
             id: self.id,
             manifest,
@@ -175,23 +178,28 @@ impl ShareSession {
         size: usize,
         orientation: Option<u8>,
     ) -> Result<FileSeal, JsValue> {
-        Ok(FileSeal(draft.0.add_file(
-            &self.id,
+        let files = draft.0.files.get_or_insert_default();
+        let index = files.len().try_into().map_err(|_| Error::Prepare)?;
+        let entry = FileEntry {
             name,
             mime,
-            size,
+            size: size as u64,
             orientation,
-        )?))
+            key: Secret32::generate().map_err(|_| Error::Prepare)?,
+        };
+        let seal = manifest::FileSeal::init(&self.id, index, &entry).map_err(|_| Error::Prepare)?;
+        files.push(entry);
+        Ok(FileSeal(seal))
     }
 }
 
 #[wasm_bindgen]
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct Draft(payload::Manifest);
+pub struct Draft(Manifest);
 
 #[wasm_bindgen]
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct FileSeal(payload::FileSeal);
+pub struct FileSeal(manifest::FileSeal);
 
 #[wasm_bindgen]
 impl FileSeal {
@@ -200,11 +208,12 @@ impl FileSeal {
     }
 
     pub fn update(&mut self, bytes: Vec<u8>) -> Result<Vec<u8>, JsValue> {
-        Ok(self.0.update(&Zeroizing::new(bytes))?)
+        let bytes = Zeroizing::new(bytes);
+        Ok(self.0.update(&bytes).map_err(|_| Error::Prepare)?)
     }
 
     pub fn finish(mut self) -> Result<Vec<u8>, JsValue> {
-        Ok(self.0.finish()?)
+        Ok(self.0.finish().map_err(|_| Error::Prepare)?)
     }
 }
 
@@ -212,34 +221,46 @@ impl FileSeal {
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct OpenedManifest {
     id: ShareId,
-    manifest: payload::Manifest,
+    manifest: Manifest,
 }
 
 #[wasm_bindgen]
 impl OpenedManifest {
     pub fn visible_content(&self) -> Result<String, JsValue> {
-        Ok(self.manifest.visible_content()?)
+        Ok(payload::visible_content(&self.manifest)?)
     }
 
     pub fn decrypt_file_init(&self, index: u32, header: &[u8]) -> Result<FileOpen, JsValue> {
-        Ok(FileOpen(self.manifest.open_file(&self.id, index, header)?))
+        let entry = self
+            .manifest
+            .files
+            .as_ref()
+            .and_then(|files| files.get(index as usize))
+            .ok_or(Error::Open)?;
+        let open =
+            manifest::FileOpen::init(&self.id, index, entry, header).map_err(|_| Error::Open)?;
+        Ok(FileOpen(open))
     }
 }
 
 #[wasm_bindgen]
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct FileOpen(payload::FileOpen);
+pub struct FileOpen(manifest::FileOpen);
 
 #[wasm_bindgen]
 impl FileOpen {
     pub fn update(&mut self, bytes: &[u8]) -> Result<Uint8Array, JsValue> {
         Ok(self
             .0
-            .update(bytes, |plaintext| Uint8Array::from(plaintext))?)
+            .update(bytes, |plaintext| Uint8Array::from(plaintext))
+            .map_err(|_| Error::Open)?)
     }
 
     pub fn finish(mut self) -> Result<Uint8Array, JsValue> {
-        Ok(self.0.finish(|plaintext| Uint8Array::from(plaintext))?)
+        Ok(self
+            .0
+            .finish(|plaintext| Uint8Array::from(plaintext))
+            .map_err(|_| Error::Open)?)
     }
 }
 

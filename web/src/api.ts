@@ -5,6 +5,26 @@ export const unavailable = "This share is unavailable. Ask the sender for a new 
 const interrupted = "The connection was interrupted. Check your network and try again.";
 const malformed = "The server sent an unexpected response. Try again later.";
 const maxDateSeconds = 8_640_000_000_000;
+const retryDelays = [500, 1500, 4000];
+
+export class NetworkError extends Error {
+  constructor() {
+    super(interrupted);
+  }
+}
+
+export async function retryNetwork<T>(work: () => Promise<T>, deadline = Infinity): Promise<T> {
+  for (const delay of retryDelays) {
+    try {
+      return await work();
+    } catch (error) {
+      if (!(error instanceof NetworkError) || Date.now() + delay >= deadline) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      if (Date.now() >= deadline) throw error;
+    }
+  }
+  return work();
+}
 
 const messages: Record<ErrorCode, string> = {
   bad_request: "The server rejected the request. Check the link or share options, then try again.",
@@ -12,14 +32,14 @@ const messages: Record<ErrorCode, string> = {
   not_found: unavailable,
   conflict: "The share changed while it was being saved. Create a new share.",
   too_large: "The share exceeds a size or file count limit. Remove some content and try again.",
-  rate_limited: "Too many shares were created. Wait before trying again.",
+  rate_limited: "The server has reached a limit. Wait before trying again.",
 };
 
 export class ApiError extends Error {
   constructor(readonly code: ErrorCode, retryAfter?: string | null) {
     const seconds = retryAfter === null || retryAfter === undefined ? undefined : Number(retryAfter);
     super(code === "rate_limited" && integer(seconds)
-      ? `Too many shares were created. Try again in ${seconds} seconds.`
+      ? `The server has reached a limit. Try again in ${seconds} seconds.`
       : messages[code]);
   }
 }
@@ -38,7 +58,7 @@ async function request(path: string, init: RequestInit, expected: number): Promi
       ...init, cache: "no-store", redirect: "error", credentials: "omit",
     });
   } catch {
-    throw new Error(interrupted);
+    throw new NetworkError();
   }
   if (response.status !== expected) {
     const value: unknown = await response.json().catch(() => undefined);
@@ -48,7 +68,13 @@ async function request(path: string, init: RequestInit, expected: number): Promi
 }
 
 async function json(response: Response): Promise<Record<string, unknown>> {
-  const value: unknown = await response.json().catch(() => undefined);
+  const body = await response.text().catch(() => { throw new NetworkError(); });
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    throw new Error(malformed);
+  }
   if (!record(value)) throw new Error(malformed);
   return value;
 }
@@ -140,10 +166,17 @@ export async function evaluate(id: string, blinded: string) {
   return { evaluated, attempts_left };
 }
 
-export async function openShare(id: string, access_tag: string, accepted?: () => void) {
-  const response = await request(`${path(id)}/open`, post({ access_tag }), 200);
-  accepted?.();
-  const result = await json(response);
+export function openShare(id: string, access_tag: string, accepted?: () => void) {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const request_id = btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  return retryNetwork(async () => {
+    const response = await request(`${path(id)}/open`, post({ access_tag, request_id }), 200);
+    accepted?.();
+    return readOpenResponse(await json(response));
+  });
+}
+
+function readOpenResponse(result: Record<string, unknown>) {
   const { manifest, files, grant, views_left } = result;
   if (!base64url(manifest) || !Array.isArray(files) || !base64url(grant, 32)) {
     throw new Error(malformed);

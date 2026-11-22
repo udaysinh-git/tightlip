@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  ApiError, commitShare, createShare, getMetadata, openShare, unavailable,
+  ApiError, NetworkError, commitShare, createShare, getMetadata, openShare, retryNetwork, unavailable,
 } from "../src/api";
-import { SUITE, base64url, errors, shareId } from "../src/wire";
+import { SUITE, base64url, errors, record, shareId } from "../src/wire";
 import type { ErrorCode } from "../src/wire";
+import { supportedImage } from "../src/image-types";
 
 const id = "A".repeat(22);
 const value = "A".repeat(43);
@@ -12,9 +13,17 @@ function reply(body: object, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), { status, headers });
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("Tightlip v1 wire contract", () => {
+  it("offers SVG as a file without making it an image preview", () => {
+    expect(supportedImage("image/svg+xml")).toBe(false);
+    expect(supportedImage("image/png")).toBe(true);
+  });
+
   it("validates canonical unpadded encodings and route length", () => {
     expect(shareId(`/s/${id}`)).toBe(id);
     expect(shareId(`/s/${id}/`)).toBeUndefined();
@@ -75,5 +84,36 @@ describe("Tightlip v1 wire contract", () => {
     expect((await openShare(id, value)).views_left).toBe(0);
     expect((await openShare(id, value)).views_left).toBeUndefined();
     await expect(openShare(id, value)).rejects.toThrow("unexpected response");
+  });
+
+  it("reuses a random request id across all three backoffs, including a lost response body", async () => {
+    vi.useFakeTimers();
+    const broken = new Response(new ReadableStream({ start(controller) { controller.error(new Error()); } }));
+    const fetch = vi.fn()
+      .mockRejectedValueOnce(new TypeError())
+      .mockResolvedValueOnce(broken)
+      .mockRejectedValueOnce(new TypeError())
+      .mockResolvedValueOnce(reply({ manifest: value, grant: value, files: [], views_left: 0 }));
+    vi.stubGlobal("fetch", fetch);
+    const opened = openShare(id, value);
+    for (const [index, delay] of [500, 1500, 4000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(fetch).toHaveBeenCalledTimes(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    expect((await opened).views_left).toBe(0);
+    const request: unknown = JSON.parse(fetch.mock.calls[0]?.[1].body ?? "");
+    expect(request).toEqual({ access_tag: value, request_id: expect.any(String) });
+    expect(record(request) && base64url(request.request_id, 16)).toBe(true);
+    for (const [, init] of fetch.mock.calls) expect(init.body).toBe(JSON.stringify(request));
+  });
+
+  it("stops retrying a download when the next attempt would exceed the grant deadline", async () => {
+    vi.useFakeTimers();
+    const work = vi.fn().mockRejectedValue(new NetworkError());
+    const failed = expect(retryNetwork(work, Date.now() + 1000)).rejects.toBeInstanceOf(NetworkError);
+    await vi.advanceTimersByTimeAsync(500);
+    await failed;
+    expect(work).toHaveBeenCalledTimes(2);
   });
 });

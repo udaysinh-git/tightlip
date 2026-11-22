@@ -10,6 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicI64, Ordering},
     },
+    time::Duration,
 };
 
 use axum::{
@@ -175,6 +176,7 @@ impl Pending {
                 name: format!("file{n}.bin"),
                 mime: "application/octet-stream".into(),
                 size: bytes.len() as u64,
+                orientation: None,
                 key: Secret32::generate().unwrap(),
             })
             .collect();
@@ -348,11 +350,15 @@ fn eval_request(path: &str, blinded: &[u8; 32]) -> Request<Body> {
 }
 
 fn open_request(path: &str, tag: &Secret32) -> Request<Body> {
+    open_request_with_id(path, tag, &share::generate_share_id().unwrap())
+}
+
+fn open_request_with_id(path: &str, tag: &Secret32, id: &ShareId) -> Request<Body> {
     json_request(
         Method::POST,
         &format!("{path}/open"),
         None,
-        json!({"access_tag": b64::encode(tag.as_bytes())}),
+        json!({"access_tag": b64::encode(tag.as_bytes()), "request_id": b64::encode(id)}),
     )
 }
 
@@ -372,11 +378,11 @@ fn bytes(value: &Value) -> Vec<u8> {
 
 #[tokio::test]
 async fn full_client_cycle_with_and_without_password() {
-    let fixture = Fixture::new(Limits::default());
-    let app = fixture.server.router();
     let large = vec![0x42; CHUNK_LEN + 1];
     let files: [&[u8]; 2] = [b"one\0\x80", &large];
     for password in [None, Some("test password with NFKC: ｐ")] {
+        let fixture = Fixture::new(Limits::default());
+        let app = fixture.server.router();
         let pending = Pending::create(&app, password, 1, 3600).await;
         let ciphertexts = pending.upload(&app, &files).await;
         pending.commit(&app).await;
@@ -431,7 +437,7 @@ async fn full_client_cycle_with_and_without_password() {
             "SELECT wrapped_key IS NULL, manifest IS NULL, upload_hash FROM shares WHERE id = ?1",
             params![pending.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
-        assert_eq!(state, (true, true, None));
+        assert_eq!(state, (true, false, None));
         let hash: Vec<u8> = db
             .query_row(
                 "SELECT hash FROM grants WHERE share_id = ?1",
@@ -454,6 +460,8 @@ async fn full_client_cycle_with_and_without_password() {
         )
         .await;
         assert_eq!(response.status, StatusCode::NO_CONTENT);
+        fixture.advance(600);
+        fixture.server.sweep().await.unwrap();
         fixture.assert_destroyed(&pending.id);
     }
 }
@@ -497,7 +505,7 @@ async fn fifty_opens_can_spend_exactly_three_views() {
 }
 
 #[tokio::test]
-async fn wrong_tag_spends_no_view_and_password_guesses_destroy_the_share() {
+async fn final_password_evaluation_can_open_before_the_grace_deadline() {
     let fixture = Fixture::new(Limits::default());
     let app = fixture.server.router();
     let pending = Pending::create(&app, Some("creation test password"), 1, 3600).await;
@@ -516,11 +524,37 @@ async fn wrong_tag_spends_no_view_and_password_guesses_destroy_the_share() {
     let response = send(&app, open_request(&pending.path, &wrong.access_tag)).await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
     assert_eq!(pending.info(&app).await.json()["views_left"], 1);
-    for attempts_left in (0..5).rev() {
+    for attempts_left in (1..5).rev() {
         let response = send(&app, eval_request(&pending.path, &blinded)).await;
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.json()["attempts_left"], attempts_left);
+        send(&app, open_request(&pending.path, &wrong.access_tag))
+            .await
+            .assert_error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
+    let (correct_blind, correct) =
+        share::start(&pending.link, Some("creation test password")).unwrap();
+    let last = send(&app, eval_request(&pending.path, &correct_blind)).await;
+    assert_eq!(last.status, StatusCode::OK);
+    assert_eq!(last.json()["attempts_left"], 0);
+    let key_removed: bool = fixture
+        .db()
+        .query_row(
+            "SELECT wrapped_key IS NULL FROM shares WHERE id = ?1",
+            params![pending.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(key_removed);
+    let correct = correct
+        .finish(&bytes(&last.json()["evaluated"]), &pending.id)
+        .unwrap();
+    assert_eq!(
+        send(&app, open_request(&pending.path, &correct.access_tag))
+            .await
+            .status,
+        StatusCode::OK
+    );
     assert_eq!(pending.info(&app).await.status, StatusCode::NOT_FOUND);
     assert_eq!(
         send(&app, eval_request(&pending.path, &blinded))
@@ -528,7 +562,149 @@ async fn wrong_tag_spends_no_view_and_password_guesses_destroy_the_share() {
             .status,
         StatusCode::NOT_FOUND
     );
+    fixture.advance(120);
+    fixture.server.sweep().await.unwrap();
+    send(&app, open_request(&pending.path, &correct.access_tag))
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+    fixture.advance(480);
+    fixture.server.sweep().await.unwrap();
     fixture.assert_destroyed(&pending.id);
+}
+
+#[tokio::test]
+async fn an_unused_final_attempt_expires_at_the_grace_deadline() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let pending = Pending::create(&app, None, 1, 3600).await;
+    pending.upload(&app, &[b"unclaimed blob"]).await;
+    pending.commit(&app).await;
+    let (blinded, _) = share::start(&pending.link, None).unwrap();
+    for attempts_left in (0..4).rev() {
+        let evaluation = send(&app, eval_request(&pending.path, &blinded)).await;
+        assert_eq!(evaluation.json()["attempts_left"], attempts_left);
+    }
+    let wrong = Secret32::generate().unwrap();
+    fixture.advance(119);
+    send(&app, open_request(&pending.path, &wrong))
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    fixture.advance(1);
+    send(&app, open_request(&pending.path, &pending.keys.access_tag))
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+    fixture.server.sweep().await.unwrap();
+    fixture.assert_destroyed(&pending.id);
+}
+
+#[tokio::test]
+async fn open_replay_returns_the_original_snapshot_and_expires() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let pending = Pending::create(&app, None, 2, 3600).await;
+    pending.upload(&app, &[b"download"]).await;
+    pending.commit(&app).await;
+    let id = share::generate_share_id().unwrap();
+    let open = || open_request_with_id(&pending.path, &pending.keys.access_tag, &id);
+    let original = send(&app, open()).await.json();
+    assert_eq!(original["views_left"], 1);
+    assert_eq!(send(&app, open()).await.json()["views_left"], 1);
+    assert_eq!(pending.info(&app).await.json()["views_left"], 1);
+    assert_eq!(pending.reveal(&app).await["views_left"], 0);
+    fixture.advance(599);
+    let replay = send(&app, open()).await.json();
+    assert_eq!(replay["views_left"], original["views_left"]);
+    assert_eq!(replay["manifest"], original["manifest"]);
+    assert_eq!(replay["files"], original["files"]);
+    assert_ne!(replay["grant"], original["grant"]);
+    let wrong = Secret32::generate().unwrap();
+    send(&app, open_request_with_id(&pending.path, &wrong, &id))
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+    fixture.advance(1);
+    send(&app, open())
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+}
+
+#[tokio::test]
+async fn an_expired_request_id_cannot_spend_another_view_on_a_live_share() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let pending = Pending::create(&app, None, 2, 3600).await;
+    pending.upload(&app, &[]).await;
+    pending.commit(&app).await;
+    let id = share::generate_share_id().unwrap();
+    let open = || open_request_with_id(&pending.path, &pending.keys.access_tag, &id);
+    assert_eq!(send(&app, open()).await.status, StatusCode::OK);
+    fixture.advance(600);
+    fixture.server.sweep().await.unwrap();
+    send(&app, open())
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+    assert_eq!(pending.info(&app).await.json()["views_left"], 1);
+    send(
+        &app,
+        json_request(
+            Method::POST,
+            &format!("{}/open", pending.path),
+            None,
+            json!({"access_tag": b64::encode(pending.keys.access_tag.as_bytes())}),
+        ),
+    )
+    .await
+    .assert_error(StatusCode::BAD_REQUEST, "bad_request");
+}
+
+#[tokio::test]
+async fn issued_grants_survive_deletion_or_attempt_exhaustion() {
+    for delete in [false, true] {
+        let fixture = Fixture::new(Limits::default());
+        let app = fixture.server.router();
+        let pending = Pending::create(&app, None, 2, 3600).await;
+        let ciphertext = pending.upload(&app, &[b"grant keeps this blob"]).await;
+        pending.commit(&app).await;
+        let grant = pending.reveal(&app).await;
+        let download = || download_request(&pending.path, 0, grant["grant"].as_str().unwrap());
+        if delete {
+            let owner = Zeroizing::new(b64::encode(pending.owner.as_bytes()));
+            let response = send(
+                &app,
+                request(
+                    Method::DELETE,
+                    &pending.path,
+                    Some(&owner),
+                    None,
+                    Body::empty(),
+                ),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            let rows: u32 = fixture
+                .db()
+                .query_row("SELECT COUNT(*) FROM shares", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 0);
+        } else {
+            let (blinded, _) = share::start(&pending.link, None).unwrap();
+            for attempts_left in (0..5).rev() {
+                let evaluation = send(&app, eval_request(&pending.path, &blinded)).await;
+                assert_eq!(evaluation.json()["attempts_left"], attempts_left);
+            }
+            fixture.advance(120);
+            fixture.server.sweep().await.unwrap();
+            send(&app, open_request(&pending.path, &pending.keys.access_tag))
+                .await
+                .assert_error(StatusCode::NOT_FOUND, "not_found");
+        }
+        assert_eq!(send(&app, download()).await.body.as_ref(), ciphertext[0]);
+        fixture.advance(600);
+        fixture.server.sweep().await.unwrap();
+        send(&app, download())
+            .await
+            .assert_error(StatusCode::NOT_FOUND, "not_found");
+        fixture.assert_destroyed(&pending.id);
+    }
 }
 
 #[tokio::test]
@@ -765,6 +941,118 @@ async fn streaming_limits_reject_excess_ciphertext_without_orphaned_blobs() {
 }
 
 #[tokio::test]
+async fn global_storage_cap_atomically_counts_manifests_and_files() {
+    let fixture = Fixture::new(Limits {
+        storage_bytes: 40,
+        ..Limits::default()
+    });
+    let app = fixture.server.router();
+    let a = Pending::create(&app, None, 1, 3600).await;
+    let b = Pending::create(&app, None, 1, 3600).await;
+    let capped = |response: Received| {
+        response.assert_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        assert_eq!(response.headers[header::RETRY_AFTER], "600");
+    };
+    let manifest = a.put("manifest", Body::from(vec![0; 20]));
+    assert_eq!(send(&app, manifest).await.status, StatusCode::NO_CONTENT);
+    let (first, second) = tokio::join!(
+        send(&app, a.put("files/0", Body::from(vec![0; 20]))),
+        send(&app, b.put("files/0", Body::from(vec![0; 20]))),
+    );
+    let (allowed, rejected) = if first.status == StatusCode::NO_CONTENT {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(allowed.status, StatusCode::NO_CONTENT);
+    capped(rejected);
+    assert_eq!(fixture.blob_count(), 1);
+    capped(send(&app, b.put("manifest", Body::from("no room"))).await);
+    let (blinded, _) = share::start(&a.link, None).unwrap();
+    capped(send(&app, create_request(blinded, 1, 3600, false)).await);
+    assert_eq!(
+        send(&app, a.put("manifest", Body::from(vec![0; 19])))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send(&app, create_request(blinded, 1, 3600, false))
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+    fixture.advance(900);
+    fixture.server.sweep().await.unwrap();
+    assert_eq!(fixture.blob_count(), 0);
+    assert_eq!(
+        fixture
+            .db()
+            .query_row("SELECT bytes FROM storage_usage", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_json_and_uploads_release_resources_at_their_deadlines() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let pending = Pending::create(&app, None, 1, 3600).await;
+
+    let json = request(
+        Method::POST,
+        "/api/v1/shares",
+        None,
+        Some("application/json"),
+        Body::from_stream(futures_util::stream::pending::<Result<Bytes, Infallible>>()),
+    );
+    let start = tokio::time::Instant::now();
+    send(&app, json)
+        .await
+        .assert_error(StatusCode::BAD_REQUEST, "bad_request");
+    assert_eq!(start.elapsed(), Duration::from_secs(10));
+
+    let mut uploads = JoinSet::new();
+    for _ in 0..8 {
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let chunks = futures_util::stream::once(async move {
+            started.send(()).unwrap();
+            Ok::<_, Infallible>(Bytes::from_static(b"partial body"))
+        });
+        let body = Body::from_stream(futures_util::StreamExt::chain(
+            chunks,
+            futures_util::stream::pending(),
+        ));
+        let upload = pending.put("files/0", body);
+        let app = app.clone();
+        uploads.spawn(async move { send(&app, upload).await });
+        ready.await.unwrap();
+    }
+    let denied = send(&app, pending.put("manifest", Body::from("ninth upload"))).await;
+    denied.assert_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    assert_eq!(denied.headers[header::RETRY_AFTER], "5");
+    tokio::time::advance(Duration::from_secs(30)).await;
+    while let Some(response) = uploads.join_next().await {
+        response
+            .unwrap()
+            .assert_error(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    assert_eq!(fixture.blob_count(), 0);
+    let start = tokio::time::Instant::now();
+    let trickle = futures_util::stream::unfold((), |()| async {
+        tokio::time::sleep(Duration::from_secs(29)).await;
+        Some((Ok::<_, Infallible>(Bytes::from_static(b"x")), ()))
+    });
+    send(&app, pending.put("manifest", Body::from_stream(trickle)))
+        .await
+        .assert_error(StatusCode::BAD_REQUEST, "bad_request");
+    assert_eq!(start.elapsed(), Duration::from_secs(900));
+    pending.upload(&app, &[b"after timeout"]).await;
+}
+
+#[tokio::test]
 async fn size_order_and_auth_are_rechecked_after_streaming() {
     let fixture = Fixture::new(Limits::default());
     let app = fixture.server.router();
@@ -831,6 +1119,32 @@ async fn only_trusted_last_forwarded_hop_affects_the_in_memory_rate_limit() {
             send(&app, create("192.0.2.2, 192.0.2.3")).await.status,
             StatusCode::CREATED
         );
+    }
+}
+
+#[tokio::test]
+async fn ipv6_addresses_in_the_same_prefix_share_a_rate_bucket() {
+    let fixture = Fixture::with_proxy(
+        Limits {
+            creates_per_ip: 1,
+            ..Limits::default()
+        },
+        true,
+    );
+    let app = fixture.server.router();
+    let (blinded, _) = share::start(&Secret32::generate().unwrap(), None).unwrap();
+    for (ip, status) in [
+        ("2001:db8:1:2::1", StatusCode::CREATED),
+        ("2001:db8:1:2:ffff::2", StatusCode::TOO_MANY_REQUESTS),
+        ("2001:db8:1:3::1", StatusCode::CREATED),
+        ("::ffff:192.0.2.9", StatusCode::CREATED),
+        ("192.0.2.9", StatusCode::TOO_MANY_REQUESTS),
+    ] {
+        let mut request = create_request(blinded, 1, 3600, false);
+        request
+            .headers_mut()
+            .insert("x-forwarded-for", ip.parse().unwrap());
+        assert_eq!(send(&app, request).await.status, status);
     }
 }
 
@@ -1035,6 +1349,52 @@ fn assert_security_headers(response: &Received) {
         let (name, value) = line.split_once(": ").unwrap();
         assert_eq!(response.headers[name], value);
     }
+}
+
+#[tokio::test]
+async fn trusted_types_header_lists_exactly_the_policies_created_by_web_source() {
+    let fixture = Fixture::new(Limits::default());
+    let response = send(
+        &fixture.server.router(),
+        request(Method::GET, "/healthz", None, None, Body::empty()),
+    )
+    .await;
+    let mut header: Vec<_> = response.headers["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .map(str::trim)
+        .find_map(|directive| directive.strip_prefix("trusted-types "))
+        .unwrap()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/src");
+    let mut policies = Vec::new();
+    let mut pending = vec![source];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|ext| matches!(ext.to_str(), Some("ts" | "tsx")))
+            {
+                let text = fs::read_to_string(path).unwrap();
+                for (offset, call) in text.match_indices(".createPolicy(") {
+                    let name = &text[offset + call.len()..];
+                    let name = name.trim_start().strip_prefix('"').unwrap();
+                    policies.push(name.split_once('"').unwrap().0.to_owned());
+                }
+            }
+        }
+    }
+    header.sort();
+    policies.sort();
+    assert!(!policies.is_empty());
+    assert_eq!(header, policies);
 }
 
 #[tokio::test]

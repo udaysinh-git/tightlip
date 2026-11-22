@@ -1,7 +1,7 @@
 //! The limit variables are `TIGHTLIP_TTL_SECONDS` (min:max),
 //! `TIGHTLIP_MAX_VIEWS`, `TIGHTLIP_ATTEMPTS` (password:passwordless offsets),
 //! `TIGHTLIP_MANIFEST_BYTES`, `TIGHTLIP_FILES_PER_SHARE`,
-//! `TIGHTLIP_TOTAL_CIPHERTEXT_BYTES`, `TIGHTLIP_PENDING_LIFETIME_SECONDS`,
+//! `TIGHTLIP_TOTAL_CIPHERTEXT_BYTES`, `TIGHTLIP_STORAGE_BYTES`, `TIGHTLIP_PENDING_LIFETIME_SECONDS`,
 //! and `TIGHTLIP_CREATES_PER_IP` (per hour).
 
 use std::{env, path::PathBuf, str::FromStr};
@@ -36,6 +36,7 @@ pub struct Limits {
     pub manifest_bytes: u32,
     pub files_per_share: u32,
     pub total_ciphertext_bytes: u64,
+    pub storage_bytes: u64,
     pub pending_lifetime_seconds: u32,
     pub creates_per_ip: u32,
 }
@@ -50,7 +51,8 @@ impl Default for Limits {
             passwordless_attempts_extra: 3,
             manifest_bytes: 256_000,
             files_per_share: 20,
-            total_ciphertext_bytes: 100_000_000,
+            total_ciphertext_bytes: 25_000_000,
+            storage_bytes: 5_000_000_000,
             pending_lifetime_seconds: 900,
             creates_per_ip: 30,
         }
@@ -108,6 +110,10 @@ impl Config {
         )?;
         if i64::try_from(limits.total_ciphertext_bytes).is_err() {
             return Err(ConfigError("TIGHTLIP_TOTAL_CIPHERTEXT_BYTES"));
+        }
+        limits.storage_bytes = number(&get, "TIGHTLIP_STORAGE_BYTES", limits.storage_bytes)?;
+        if i64::try_from(limits.storage_bytes).is_err() {
+            return Err(ConfigError("TIGHTLIP_STORAGE_BYTES"));
         }
         limits.pending_lifetime_seconds = number(
             &get,
