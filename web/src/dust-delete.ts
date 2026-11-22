@@ -4,7 +4,7 @@ import { motionAllowed } from "./transitions";
 const duration = 400;
 const release = 145;
 
-export function scatterDust(bounds: DOMRect[], began: number): () => void {
+export function scatterDust(box: DOMRect, began: number): () => void {
   if (performance.now() - began >= duration || !motionAllowed()) return () => undefined;
   const width = window.innerWidth;
   const height = window.innerHeight;
@@ -18,25 +18,22 @@ export function scatterDust(bounds: DOMRect[], began: number): () => void {
 
   // Sample visible panel geometry, without copying secret text or image pixels to a canvas.
   const grains: { x: number; y: number; at: number; dx: number; dy: number; size: number }[] = [];
-  for (const box of bounds) {
-    const left = Math.max(box.left, 0);
-    const right = Math.min(box.right, width);
-    const top = Math.max(box.top, 0);
-    const bottom = Math.min(box.bottom, height);
-    const grain = Math.max(7, Math.sqrt(Math.max(0, right - left) * Math.max(0, bottom - top) / 180));
-    for (let y = top; y < bottom; y += grain) {
-      for (let x = left; x < right; x += grain) {
-        if (grains.length >= 1000) break;
-        grains.push({
-          x, y, at: (right - x) / (right - left) * release + Math.random() * 20,
-          dx: 12 + Math.random() * 34, dy: -5 - Math.random() * 16, size: 1 + Math.random() * 2,
-        });
-      }
+  const left = Math.max(box.left, 0);
+  const right = Math.min(box.right, width);
+  const top = Math.max(box.top, 0);
+  const bottom = Math.min(box.bottom, height);
+  const grain = Math.max(7, Math.sqrt(Math.max(0, right - left) * Math.max(0, bottom - top) / 220));
+  for (let y = top; y < bottom; y += grain) {
+    for (let x = left; x < right; x += grain) {
+      grains.push({
+        x, y, at: (right - x) / (right - left) * release + Math.random() * 20,
+        dx: 12 + Math.random() * 34, dy: -5 - Math.random() * 16, size: 1 + Math.random() * 2,
+      });
     }
   }
   if (!grains.length) return () => undefined;
   document.body.append(canvas);
-  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--secondary");
   let frame = requestAnimationFrame(draw);
 
   function stop() {

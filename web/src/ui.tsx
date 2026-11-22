@@ -32,10 +32,12 @@ export function message(error: unknown) {
   return error instanceof Error ? error.message : "The action failed. Try again.";
 }
 
-export function Expiry(props: { seconds: number }) {
+export function Expiry(props: { seconds: number; label?: string }) {
   const date = () => new Date(props.seconds * 1000);
   const format = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
-  return <span>Expires <time datetime={date().toISOString()}>{format.format(date())}</time></span>;
+  return <time datetime={date().toISOString()} title={format.format(date())}>
+    {props.label ?? `Expires ${format.format(date())}`}
+  </time>;
 }
 
 export function fileSize(size: number): string {

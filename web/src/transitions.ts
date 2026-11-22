@@ -2,8 +2,8 @@ import { flush } from "solid-js";
 
 export const enter = "cubic-bezier(0.22, 1, 0.36, 1)";
 const move = "cubic-bezier(0.25, 1, 0.5, 1)";
-type Moment = "forward" | "back" | "expiry" | "views" | "password" | "files" | "progress"
-  | "link" | "compose" | "sealed" | "reveal" | "burn" | "secret-password" | "secret-totp" | "error";
+type Moment = "forward" | "back" | "files" | "link" | "compose" | "reveal" | "burn"
+  | "secret-password" | "secret-totp";
 
 interface Running {
   transition: ViewTransition;
@@ -56,6 +56,21 @@ export function finishViewTransition() {
   interrupt()?.apply();
 }
 
+export function paperDust(paper: HTMLElement, pointer: boolean): () => void {
+  if (!motionAllowed(pointer)) return () => undefined;
+  const bounds = paper.getBoundingClientRect();
+  const began = performance.now();
+  let cancelled = false;
+  let stop: (() => void) | undefined;
+  void import("./dust-delete").then(({ scatterDust }) => {
+    if (!cancelled) stop = scatterDust(bounds, began);
+  }).catch(() => undefined);
+  return () => {
+    cancelled = true;
+    stop?.();
+  };
+}
+
 export function changeView(moment: Moment, update: () => void, pointer: boolean): Promise<void> {
   const previous = interrupt();
   let applied = false;
@@ -67,14 +82,17 @@ export function changeView(moment: Moment, update: () => void, pointer: boolean)
     update();
     flush();
   };
-  if (!motionAllowed(pointer) || document.visibilityState === "hidden") {
+  const reduced = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const crossfade = reduced && ["link", "compose", "reveal", "burn"].includes(moment);
+  const supported = typeof document.startViewTransition === "function";
+  if (!supported || (!crossfade && !motionAllowed(pointer)) || document.visibilityState === "hidden") {
     apply();
     return Promise.resolve();
   }
 
   const root = document.documentElement;
   root.dataset.motion = moment;
-  const start = sharedPositions();
+  const start = crossfade ? new Map<string, DOMRect>() : sharedPositions();
   let transition: ViewTransition;
   try {
     transition = document.startViewTransition(apply);
@@ -92,23 +110,16 @@ export function changeView(moment: Moment, update: () => void, pointer: boolean)
   void transition.finished.then(clear, clear);
   void transition.ready.then(() => {
     if (active?.transition !== transition || !motionAllowed()) return;
-    let incomingFiles = 0;
     for (const [name, end] of sharedPositions()) {
       const first = start.get(name);
-      if (!first && moment === "files") {
-        root.animate(
-          [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "translateY(0)" }],
-          { pseudoElement: `::view-transition-new(${name})`, duration: 140,
-            delay: Math.min(incomingFiles++, 4) * 40, fill: "backwards", easing: enter },
-        );
-      }
-      if (!first || (first.x === end.x && first.y === end.y)) continue;
+      if (!first || !end.width || !end.height) continue;
+      if (first.x === end.x && first.y === end.y && first.width === end.width && first.height === end.height) continue;
       root.animate(
-        [{ transform: `translate(${first.x}px, ${first.y}px)` },
+        [{ transform: `translate(${first.x}px, ${first.y}px) scale(${first.width / end.width}, ${first.height / end.height})` },
           { transform: `translate(${end.x}px, ${end.y}px)` }],
         {
           pseudoElement: `::view-transition-group(${name})`,
-          duration: moment === "files" || moment === "forward" || moment === "back" ? 180 : 260,
+          duration: name === "content-indicator" ? 180 : 320,
           easing: move,
         },
       );

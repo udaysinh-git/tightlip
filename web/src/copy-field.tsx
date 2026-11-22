@@ -6,6 +6,7 @@ import { playSound, prepareSound } from "./share-sounds";
 export function CopyButton(props: {
   label: string;
   value: string;
+  primary?: boolean;
   feedback: (text: string, error?: boolean, pointer?: boolean) => void;
 }) {
   const [copied, setCopied] = createSignal(false);
@@ -33,17 +34,19 @@ export function CopyButton(props: {
   }
 
   return (
-    <button type="button" class="icon-button copy-button" aria-label={props.label} title={props.label}
+    <button type="button" class={props.primary ? "primary copy-primary copy-button" : "icon-button copy-button"}
+      aria-label={props.primary ? undefined : props.label} title={props.primary ? undefined : props.label}
       data-copied={copied() ? "" : undefined} data-animate={animate() ? "" : undefined}
       onClick={(event) => void copy(event)}>
-      <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none"
-        stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+      <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none"
+        stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <g class="copy-pages">
           <rect x="8" y="8" width="14" height="14" rx="2" />
           <path class="copy-back" d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
         </g>
         <path class="copy-check" d="m20 6-11 11-5-5" />
       </svg>
+      {props.primary ? (copied() ? "Copied" : props.label) : undefined}
     </button>
   );
 }

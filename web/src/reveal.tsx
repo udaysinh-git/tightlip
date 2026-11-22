@@ -2,15 +2,17 @@ import { For, Show, createSignal, flush, onCleanup } from "solid-js";
 import { unavailable } from "./api";
 import type { Metadata } from "./api";
 import { CopyButton } from "./copy-field";
+import { createFeedback, Feedback } from "./feedback";
 import { passwordError } from "./form-error";
 import { Icon } from "./icons";
 import { supportedImage } from "./image-types";
 import { MaskedSecret } from "./masked-secret";
 import { RollingCounter } from "./rolling-counter";
+import { Seal, SealGlyph } from "./seal";
+import { viewLabel } from "./sentence-choice";
 import { playSound } from "./share-sounds";
 import { DecodedImage, TextReveal } from "./text-reveal";
-import { ToastStack, createToasts } from "./toast-stack";
-import { changeView, finishViewTransition, motionAllowed } from "./transitions";
+import { changeView, finishViewTransition, motionAllowed, paperDust } from "./transitions";
 import { Expiry, IconButton, fileSize, message } from "./ui";
 import { WorkerError } from "./worker-client";
 import type { CryptoClient } from "./worker-client";
@@ -20,18 +22,15 @@ import type { LoginField, Revealed, RevealedFile } from "./worker-protocol";
 const fields = Object.keys(loginFields) as LoginField[];
 
 function LoginValue(props: {
-  field: LoginField; value: string; index: number; animate: boolean;
-  feedback: (status: string, error?: boolean, pointer?: boolean) => void;
+  field: LoginField; value: string; feedback: ReturnType<typeof createFeedback>["notify"];
 }) {
-  const label = () => loginFields[props.field];
+  const label = () => props.field === "totp" ? "TOTP" : loginFields[props.field];
   const masked = () => props.field === "password" || props.field === "totp" ? props.field : undefined;
   return (
-    <div class="field revealed-field" data-animate={props.animate ? "" : undefined} ref={(element) => {
-      element.style.setProperty("--field-delay", `${props.index * 40}ms`);
-    }}>
+    <div class="login-field revealed-field">
       <span>{label()}</span>
       <div class="input-row">
-        <Show when={masked()} keyed fallback={<span class="secret mono">{props.value}</span>}>
+        <Show when={masked()} keyed fallback={<span class="secret">{props.value}</span>}>
           {(field) => <MaskedSecret field={field} label={label()} value={props.value} />}
         </Show>
         <CopyButton label={`Copy ${label().toLowerCase()}`} value={props.value} feedback={props.feedback} />
@@ -68,9 +67,11 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
   const [invalid, setInvalid] = createSignal(false);
   const [animate, setAnimate] = createSignal(false);
   const [gone, setGone] = createSignal(false);
-  const toasts = createToasts();
-  const count = () => opened()?.viewsLeft ?? metadata()?.views_left;
+  const [priorCount, setPriorCount] = createSignal(0);
+  const [keyless, setKeyless] = createSignal(false);
+  const feedback = createFeedback();
   let field: HTMLInputElement | undefined;
+  let seal: HTMLSpanElement | undefined;
   let panel: HTMLDivElement | undefined;
   let submitPointer = false;
   let departed = false;
@@ -89,6 +90,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
       setPassword("");
       setGone(true);
       setLoading(false);
+      feedback.notify("");
     });
   }
 
@@ -99,9 +101,17 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
     window.removeEventListener("pagehide", leave);
   });
 
-  void props.client.call("load", { path: props.path, fragment: props.takeFragment() })
+  // The key lives only in the address fragment, which is removed on arrival. A reload has none.
+  const fragment = props.takeFragment();
+  if (!fragment) {
+    setKeyless(true);
+    setLoading(false);
+  } else void props.client.call("load", { path: props.path, fragment })
     .then((share) => { if (!departed) setMetadata(share); }, (cause: unknown) => {
-      if (!departed) toasts.notify(message(cause), true, false);
+      if (departed) return;
+      const problem = message(cause);
+      if (problem === unavailable) setGone(true);
+      else feedback.notify(problem, true);
     }).finally(() => setLoading(false));
 
   async function submit(event: SubmitEvent) {
@@ -114,36 +124,42 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
     const value = share.has_password ? password() : undefined;
     playSound("tap");
     try {
-      await changeView("sealed", () => {
-        toasts.notify("", true);
+      flush(() => {
+        feedback.notify("");
         setInvalid(false);
-        setAnimate(motionAllowed(pointer));
         setBusy(true);
-      }, pointer);
+      });
       if (departed) return;
       const content = await props.client.call("reveal", { password: value });
       if (departed) return;
+      if (seal && motionAllowed(pointer)) {
+        seal.dataset.breaking = "";
+        await Promise.allSettled(seal.getAnimations({ subtree: true }).map((animation) => animation.finished));
+      }
+      if (departed) return;
       await changeView("reveal", () => {
         setAnimate(motionAllowed(pointer));
+        setPriorCount(share.views_left);
         setOpened(content);
         setMetadata(undefined);
         setPassword("");
         setBusy(false);
       }, pointer);
-      if (!pointer) document.getElementById("reveal-title")?.focus({ preventScroll: true });
+      if (!pointer) document.getElementById("revealed-paper")?.focus({ preventScroll: true });
     } catch (cause) {
       if (departed) return;
       const problem = message(cause);
       const wrong = cause instanceof WorkerError && cause.wrongPassword;
-      await changeView("error", () => {
+      flush(() => {
         if (problem === unavailable || (cause instanceof WorkerError && cause.usedView)) {
           setMetadata(undefined);
           setPassword("");
+          setGone(true);
         }
         setInvalid(wrong);
         setBusy(false);
-        toasts.notify(problem, true, pointer);
-      }, pointer);
+        if (problem !== unavailable) feedback.notify(problem, true);
+      });
       if (wrong) passwordError(field, pointer);
     } finally {
       revealing = false;
@@ -156,81 +172,102 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
     closing = true;
     const pointer = event.detail > 0;
     playSound("dissolve");
-    if (motionAllowed(pointer)) {
-      const bounds = [...panel.querySelectorAll(".plain, .secret, .revealed-image, .file-row")]
-        .map((element) => element.getBoundingClientRect());
-      const began = performance.now();
-      void import("./dust-delete").then(({ scatterDust }) => {
-        if (!departed) stopDust = scatterDust(bounds, began);
-      }).catch(() => undefined);
-    }
+    stopDust = paperDust(panel, pointer);
     void changeView("burn", () => {
       setOpened(undefined);
       setGone(true);
-      toasts.notify("");
-      toasts.notify("", true);
+      feedback.notify("");
     }, pointer).then(() => {
       if (!pointer) document.getElementById("share-gone")?.focus({ preventScroll: true });
     });
   }
 
   return (
-    <section aria-labelledby="reveal-title">
-      <h1 id="reveal-title" tabindex={-1}>Shared with you</h1>
-      <Show when={loading()}><p class="secondary" role="status">Checking link…</p></Show>
-      <Show when={count() !== undefined}>
-        <p class="secondary share-meta">
-          <Show when={metadata()} keyed>{(share) => <><Expiry seconds={share.expires_at} />. </>}</Show>
-          <RollingCounter count={count() ?? 0} animate={animate()} />
-        </p>
+    <section aria-label="Shared secret">
+      <Show when={loading()}>
+        <p class="paper folded-paper quiet-paper" role="status">Checking link…</p>
       </Show>
       <Show when={metadata()} keyed>{(share) => (
-        <form onSubmit={submit} class="reveal-form reveal-panel">
-          <div class="sealed-placeholder" aria-hidden="true"><Icon name="lock" /></div>
-          <Show when={share.has_password}>
-            <label class="field" for="reveal-password">
-              <span>Share password</span>
-              <input type="password" autocomplete="off" id="reveal-password" disabled={busy()}
-                aria-invalid={invalid() ? "true" : "false"} ref={(element) => { field = element; }}
-                value={password()} onInput={(event) => {
-                  setPassword(event.currentTarget.value);
-                  setInvalid(false);
-                  toasts.notify("", true);
-                }} />
-            </label>
-          </Show>
-          <button class="primary" type="submit" disabled={busy()}
-            onClick={(event) => { submitPointer = event.detail > 0; }}>{busy() ? "Revealing…" : "Reveal"}</button>
+        <form class="reveal-form" onSubmit={submit}>
+          <div class="paper folded-paper sealed-paper" data-motion-shared="">
+            <Seal capture={(element) => { seal = element; }} />
+            <div class="sealed-message">
+              <p>Someone sealed this for you. {share.views_left === 1
+                ? "It burns after this view." : `${viewLabel(share.views_left)} left.`}</p>
+              <span class="visually-hidden"><Expiry seconds={share.expires_at} />.</span>
+            </div>
+            <Show when={share.has_password}>
+              <label class="reveal-password" for="reveal-password">
+                <span>Share password</span>
+                <input type="password" autocomplete="off" id="reveal-password" disabled={busy()}
+                  aria-invalid={invalid() ? "true" : "false"} ref={(element) => { field = element; }}
+                  value={password()} onInput={(event) => {
+                    setPassword(event.currentTarget.value);
+                    setInvalid(false);
+                    feedback.notify("");
+                  }} />
+              </label>
+            </Show>
+          </div>
+          <Feedback feedback={feedback} />
+          <div class="primary-slot">
+            <button class="primary" type="submit" disabled={busy()}
+              onClick={(event) => { submitPointer = event.detail > 0; }}>
+              <SealGlyph />{busy() ? "Opening…" : "Break the seal"}
+            </button>
+          </div>
         </form>
       )}</Show>
       <Show when={opened()} keyed>{(content) => (
-        <TextReveal capture={(element) => { panel = element; }}>
-          <Show when={content.note !== undefined}><pre class="plain mono">{content.note}</pre></Show>
-          <Show when={content.login} keyed>{(login) => (
-            <div class="fields">
-              <For each={fields.filter((field) => login[field] !== undefined)}>{(field, index) => (
-                <LoginValue field={field} value={login[field] ?? ""} index={index()}
-                  animate={animate()} feedback={toasts.notify} />
-              )}</For>
+        <>
+          <div class="paper open-paper revealed-paper" id="revealed-paper" tabindex={-1}
+            data-motion-shared="" ref={(element) => { panel = element; }}>
+            <TextReveal>
+              <Show when={content.note !== undefined}>
+                <div class="note-row">
+                  <pre class="plain">{content.note}</pre>
+                  <CopyButton label="Copy text" value={content.note ?? ""} feedback={feedback.notify} />
+                </div>
+              </Show>
+              <Show when={content.login} keyed>{(login) => (
+                <div class="login-fields">
+                  <For each={fields.filter((field) => login[field] !== undefined)}>{(field) => (
+                    <LoginValue field={field} value={login[field] ?? ""} feedback={feedback.notify} />
+                  )}</For>
+                </div>
+              )}</Show>
+              <Show when={content.files.length > 0}>
+                <ul class="file-list"><For each={content.files}>{(file) => (
+                  <RevealedAttachment file={file} animate={animate()} />
+                )}</For></ul>
+              </Show>
+            </TextReveal>
+          </div>
+          <Show when={content.viewsLeft !== undefined}>
+            <div class="reveal-meta">
+              <p class="sentence" role="status"><Show when={content.viewsLeft === 0} fallback={
+                <><RollingCounter count={content.viewsLeft ?? 0} previous={priorCount()} animate={animate()} />
+                  {" "}{content.viewsLeft === 1 ? "view" : "views"} left.</>
+              }>This was the last view. It's gone from the server.</Show></p>
+              <Show when={content.viewsLeft === 0}>
+                <IconButton icon="remove" label="Close share" onClick={closeLastView} />
+              </Show>
             </div>
-          )}</Show>
-          <Show when={content.files.length > 0}>
-            <ul class="file-list"><For each={content.files}>{(file) => (
-              <RevealedAttachment file={file} animate={animate()} />
-            )}</For></ul>
           </Show>
-          <Show when={content.viewsLeft === 0}>
-            <div class="last-view">
-              <p class="secondary">This was the last view.</p>
-              <IconButton icon="remove" label="Close share" onClick={closeLastView} />
-            </div>
-          </Show>
-        </TextReveal>
+          <Feedback feedback={feedback} />
+        </>
       )}</Show>
       <Show when={gone()}>
-        <p class="reveal-panel secondary" id="share-gone" role="status" tabindex={-1}>This share is gone.</p>
+        <p class="paper folded-paper quiet-paper ash-paper" id="share-gone" role="status" tabindex={-1}
+          data-motion-shared="">Nothing here. The link has burned or expired.</p>
       </Show>
-      <ToastStack toasts={toasts} />
+      <Show when={keyless()}>
+        <p class="paper folded-paper quiet-paper" role="status">This page no longer holds the key. Open the link you were sent again. Nothing has been used up.</p>
+      </Show>
+      <Show when={!metadata() && !opened() && !loading() && !keyless()}>
+        <Show when={!gone()}><p class="paper folded-paper quiet-paper">Could not check this link.</p></Show>
+        <Feedback feedback={feedback} />
+      </Show>
     </section>
   );
 }

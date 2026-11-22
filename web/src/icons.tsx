@@ -118,8 +118,8 @@ const shapes = {
 
 export function Icon(props: { name: keyof typeof shapes }) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none"
-      stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none"
+      stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       {shapes[props.name]()}
     </svg>
   );

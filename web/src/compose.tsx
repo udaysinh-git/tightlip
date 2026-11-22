@@ -1,17 +1,18 @@
-import { For, Show, createSignal, onCleanup } from "solid-js";
+import { For, Show, createSignal, flush, onCleanup } from "solid-js";
 import type { CryptoClient } from "./worker-client";
 import { Expiry, IconButton, message } from "./ui";
-import { Icon } from "./icons";
 import { ContentTabs } from "./content-tabs";
 import type { ContentKind } from "./content-tabs";
 import { CopyButton } from "./copy-field";
+import { createFeedback, Feedback } from "./feedback";
 import { HoldDelete } from "./hold-delete";
 import { PasswordStrength } from "./password-strength";
+import { Seal } from "./seal";
+import { expiryChoices, SentenceChoice, viewChoices, viewLabel } from "./sentence-choice";
 import { UploadAction } from "./upload-action";
 import { UploadDropzone } from "./upload-dropzone";
 import type { PickedFile } from "./upload-dropzone";
-import { ToastStack, createToasts } from "./toast-stack";
-import { changeView, isPointer } from "./transitions";
+import { changeView, paperDust } from "./transitions";
 import { playSound } from "./share-sounds";
 import { supportedImage } from "./image-types";
 import { limits } from "./wire";
@@ -19,13 +20,12 @@ import { loginFields } from "./worker-protocol";
 import type { Content, Created, Login, LoginField, Progress } from "./worker-protocol";
 
 const loginKeys = Object.keys(loginFields) as LoginField[];
-const expiryLabels: Record<number, string> = { 300: "5 minutes", 3600: "1 hour", 86400: "1 day",
-  604800: "7 days", 2592000: "30 days" };
 
 export function Compose(props: { client: CryptoClient }) {
   const [kind, setKind] = createSignal<ContentKind>("text");
   const [text, setText] = createSignal("");
   const [login, setLogin] = createSignal<Login>({});
+  const [showLoginPassword, setShowLoginPassword] = createSignal(false);
   const [picked, setPicked] = createSignal<PickedFile[]>([]);
   const [ttl, setTtl] = createSignal(86400);
   const [views, setViews] = createSignal(1);
@@ -35,12 +35,13 @@ export function Compose(props: { client: CryptoClient }) {
   const [uploading, setUploading] = createSignal(false);
   const [uploadPointer, setUploadPointer] = createSignal(false);
   const [progress, setProgress] = createSignal<Progress>();
-  const [created, setCreated] = createSignal<Created>();
-  const toasts = createToasts();
-  const setError = (value: string) => toasts.notify(value, true);
-  let nextFile = 0;
+  const [created, setCreated] = createSignal<Created & { ttl: number; views: number }>();
+  const feedback = createFeedback();
   let submitPointer = false;
   let creating = false;
+  let passwordField: HTMLInputElement | undefined;
+  let folded: HTMLDivElement | undefined;
+  let stopDust: (() => void) | undefined;
 
   function clearFiles() {
     for (const { thumbnail } of picked()) {
@@ -50,6 +51,7 @@ export function Compose(props: { client: CryptoClient }) {
   }
 
   onCleanup(clearFiles);
+  onCleanup(() => stopDust?.());
 
   function pick(files: FileList, pointer: boolean) {
     const incoming = Array.from(files);
@@ -58,12 +60,12 @@ export function Compose(props: { client: CryptoClient }) {
       if (old.length + incoming.length > limits.files
         || [...old.map((item) => item.file), ...incoming].reduce((size, file) => size + file.size, 0)
           > limits.ciphertext) {
-        setError("These files exceed the share limit. Pick up to 20 files totalling less than 100 MB.");
+        feedback.notify("These files exceed the share limit. Pick up to 20 files totalling less than 100 MB.", true);
         return;
       }
-      setError("");
+      feedback.notify("");
       setPicked([...old, ...incoming.map((file) => ({
-        id: ++nextFile, file, thumbnail: supportedImage(file.type) ? URL.createObjectURL(file) : undefined,
+        file, thumbnail: supportedImage(file.type) ? URL.createObjectURL(file) : undefined,
       }))]);
     }, pointer);
   }
@@ -72,13 +74,13 @@ export function Compose(props: { client: CryptoClient }) {
     void changeView("files", () => {
       if (item.thumbnail) URL.revokeObjectURL(item.thumbnail);
       setPicked((items) => items.filter((other) => other !== item));
-      setError("");
+      feedback.notify("");
     }, pointer);
   }
 
   function updateField(field: LoginField, value: string) {
     setLogin((previous) => ({ ...previous, [field]: value || undefined }));
-    setError("");
+    feedback.notify("");
   }
 
   function valid(): boolean {
@@ -93,14 +95,15 @@ export function Compose(props: { client: CryptoClient }) {
     if (creating) return;
     creating = true;
     setBusy(true);
-    setError("");
+    feedback.notify("");
     try {
       updateField("password", await props.client.call("password", undefined));
     } catch (cause) {
-      setError(message(cause));
+      feedback.notify(message(cause), true);
     } finally {
       creating = false;
-      setBusy(false);
+      flush(() => setBusy(false));
+      document.getElementById("login-password")?.focus({ preventScroll: true });
     }
   }
 
@@ -118,20 +121,20 @@ export function Compose(props: { client: CryptoClient }) {
     };
     playSound("tap");
     try {
-      await changeView("progress", () => {
+      flush(() => {
         setBusy(true);
         setUploading(true);
         setUploadPointer(pointer);
-        setError("");
-        toasts.notify("");
+        feedback.notify("");
         setProgress(undefined);
-      }, pointer);
+      });
       const share = await props.client.call("create", input, setProgress);
       await changeView("link", () => {
-        setCreated(share);
+        setCreated({ ...share, ttl: input.ttl, views: input.views });
         setKind("text");
         setText("");
         setLogin({});
+        setShowLoginPassword(false);
         setPassword("");
         setPasswordOpen(false);
         setTtl(86400);
@@ -140,11 +143,11 @@ export function Compose(props: { client: CryptoClient }) {
       }, pointer);
       if (!pointer) document.getElementById("created-link")?.focus({ preventScroll: true });
     } catch (cause) {
-      await changeView("progress", () => {
+      flush(() => {
         setUploading(false);
         setBusy(false);
-        toasts.notify(message(cause), true, pointer);
-      }, pointer);
+        feedback.notify(message(cause), true);
+      });
       if (!pointer) document.getElementById("create-link")?.focus({ preventScroll: true });
     } finally {
       setProgress(undefined);
@@ -158,18 +161,22 @@ export function Compose(props: { client: CryptoClient }) {
     if (creating) return;
     creating = true;
     setBusy(true);
-    setError("");
-    toasts.notify("");
+    feedback.notify("");
     try {
       const deleted = await props.client.call("remove", undefined);
-      await changeView("compose", () => {
+      if (deleted && folded) {
+        playSound("dissolve");
+        stopDust?.();
+        stopDust = paperDust(folded, pointer);
+      }
+      await changeView(deleted ? "burn" : "compose", () => {
         setCreated(undefined);
         setBusy(false);
-        toasts.notify(deleted ? "Share deleted." : "This share is already unavailable.", false, pointer);
+        feedback.notify(deleted ? "Share burned." : "This share is already unavailable.");
       }, pointer);
-      if (!pointer) document.getElementById("tab-text")?.focus({ preventScroll: true });
+      if (!pointer) document.getElementById("share-text")?.focus({ preventScroll: true });
     } catch (cause) {
-      setError(message(cause));
+      feedback.notify(message(cause), true);
     } finally {
       creating = false;
       setBusy(false);
@@ -180,124 +187,111 @@ export function Compose(props: { client: CryptoClient }) {
     props.client.close();
     void changeView("compose", () => {
       setCreated(undefined);
-      toasts.notify("");
-      setError("");
+      feedback.notify("");
     }, event.detail > 0).then(() => {
-      if (event.detail === 0) document.getElementById("tab-text")?.focus({ preventScroll: true });
+      if (event.detail === 0) document.getElementById("share-text")?.focus({ preventScroll: true });
     });
   }
 
+  function toggleSharePassword() {
+    const open = !passwordOpen();
+    flush(() => setPasswordOpen(open));
+    if (open) passwordField?.focus({ preventScroll: true });
+  }
+
   return (
-    <>
-      <Show when={created()} keyed fallback={
-        <section class="compose-view" aria-labelledby="compose-title">
-          <h1 class="compose-heading" id="compose-title">New share</h1>
-          <form onSubmit={submit}>
-            <fieldset disabled={busy()}>
-              <ContentTabs value={kind()} select={(value) => { setKind(value); setError(""); }} />
-              <div class="content-area compose-content" id="compose-content" role="tabpanel"
-                aria-labelledby={`tab-${kind()}`} data-motion-shared="">
-                <Show when={kind() === "text"}>
-                  <label class="field" for="share-text">
-                    <span>Text</span>
-                    <textarea id="share-text" class="mono" placeholder="Enter text to share"
-                      spellcheck={false} value={text()} onInput={(event) => setText(event.currentTarget.value)} />
-                  </label>
-                </Show>
-                <Show when={kind() === "login"}>
-                  <div class="fields">
-                    <For each={loginKeys}>{(field) => (
-                      <div class="field">
-                        <label for={`login-${field}`}>{loginFields[field]}</label>
-                        <Show when={field === "note"} fallback={
-                          <span class="input-row">
-                            <input class="mono" id={`login-${field}`}
-                              type={field === "password" ? "password" : "text"}
-                              autocomplete={field === "password" ? "new-password" : "off"}
-                              spellcheck={false} value={login()[field] ?? ""}
-                              onInput={(event) => updateField(field, event.currentTarget.value)} />
-                            <Show when={field === "password"}>
-                              <IconButton icon="refresh" label="Generate password" onClick={() => void generate()} />
-                            </Show>
-                          </span>
-                        }>
-                          <textarea class="mono login-note" id={`login-${field}`} value={login()[field] ?? ""}
-                            onInput={(event) => updateField(field, event.currentTarget.value)} />
-                        </Show>
-                      </div>
-                    )}</For>
-                  </div>
-                </Show>
-                <Show when={kind() === "files"}>
-                  <UploadDropzone disabled={busy()} items={picked()} pick={pick} remove={removeFile} />
-                </Show>
-              </div>
-              <div class="options">
-                <label>Expiry
-                  <span class="select-wrap expiry-choice">
-                    <select onChange={(event) => {
-                      const value = Number(event.currentTarget.value);
-                      void changeView("expiry", () => setTtl(value), isPointer());
-                    }}>
-                      <option value="300">5 minutes</option>
-                      <option value="3600">1 hour</option>
-                      <option value="86400" selected>1 day</option>
-                      <option value="604800">7 days</option>
-                      <option value="2592000">30 days</option>
-                    </select>
-                    <span class="option-value" aria-hidden="true">{expiryLabels[ttl()]}</span>
-                    <Icon name="chevron" />
-                  </span>
-                </label>
-                <label>Views
-                  <span class="select-wrap views-choice">
-                    <select onChange={(event) => {
-                      const value = Number(event.currentTarget.value);
-                      void changeView("views", () => setViews(value), isPointer());
-                    }}>
-                      <option value="1" selected>1</option>
-                      <option value="3">3</option>
-                      <option value="10">10</option>
-                    </select>
-                    <span class="option-value" aria-hidden="true">{views()}</span>
-                    <Icon name="chevron" />
-                  </span>
-                </label>
-                <IconButton icon="lock" label="Share password" expanded={passwordOpen()} controls="share-password"
-                  pressed={passwordOpen()} onClick={(event) => {
-                    void changeView("password", () => setPasswordOpen((open) => !open), event.detail > 0)
-                      .then(() => {
-                        if (passwordOpen()) document.getElementById("share-password")?.focus({ preventScroll: true });
-                      });
+    <Show when={created()} keyed fallback={
+      <section aria-label="Compose a secret">
+        <form onSubmit={submit}>
+          <fieldset disabled={busy()}>
+            <div class="paper open-paper compose-paper" id="compose-content" role="tabpanel"
+              aria-labelledby={`tab-${kind()}`} data-kind={kind()} data-motion-shared="">
+              <Show when={kind() === "text"}>
+                <textarea id="share-text" class="note-text" aria-label="Secret text" placeholder="Write the secret here"
+                  spellcheck={false} value={text()} onInput={(event) => {
+                    setText(event.currentTarget.value);
+                    feedback.notify("");
                   }} />
-              </div>
+              </Show>
+              <Show when={kind() === "login"}>
+                <div class="login-fields">
+                  <For each={loginKeys}>{(field) => (
+                    <div class="login-field">
+                      <label for={`login-${field}`}>{field === "totp" ? "TOTP" : loginFields[field]}</label>
+                      <Show when={field === "note"} fallback={
+                        <span class="input-row">
+                          <input id={`login-${field}`}
+                            type={field === "password" && !showLoginPassword() ? "password" : "text"}
+                            autocomplete={field === "password" ? "new-password" : "off"}
+                            spellcheck={false} value={login()[field] ?? ""}
+                            onInput={(event) => updateField(field, event.currentTarget.value)} />
+                          <Show when={field === "password"}>
+                            <IconButton icon={showLoginPassword() ? "hide" : "eye"}
+                              label={showLoginPassword() ? "Hide password" : "Show password"}
+                              pressed={showLoginPassword()} onClick={() => setShowLoginPassword((shown) => !shown)} />
+                            <IconButton icon="refresh" label="Generate password" onClick={() => void generate()} />
+                          </Show>
+                        </span>
+                      }>
+                        <textarea class="login-note" id={`login-${field}`} value={login()[field] ?? ""}
+                          rows={1} onInput={(event) => updateField(field, event.currentTarget.value)} />
+                      </Show>
+                    </div>
+                  )}</For>
+                </div>
+              </Show>
+              <Show when={kind() === "files"}>
+                <UploadDropzone disabled={busy()} items={picked()} pick={pick} remove={removeFile} />
+              </Show>
+            </div>
+            <ContentTabs value={kind()} select={(value) => {
+              setKind(value);
+              setShowLoginPassword(false);
+              feedback.notify("");
+            }} />
+          </fieldset>
+          <div class="compose-foot">
+            <fieldset class="sentence compose-options" disabled={busy()}>
+              <span class="sentence-part">Burns after <SentenceChoice id="view-options" label="Views"
+                choices={viewChoices} value={views()} change={setViews} /></span>{" "}
+              <span class="sentence-part">or <SentenceChoice id="expiry-options" label="Expiry"
+                choices={expiryChoices} value={ttl()} change={setTtl} />.</span>{" "}
+              <button class="sentence-button password-toggle" type="button" onClick={toggleSharePassword}
+                aria-expanded={passwordOpen() ? "true" : "false"}
+                aria-controls={passwordOpen() ? "share-password-line" : undefined}>
+                <span>{passwordOpen() ? "Remove password" : "Add a password"}</span>
+              </button>{" "}
               <Show when={passwordOpen()}>
-                <PasswordStrength value={password()} change={setPassword} />
+                <PasswordStrength value={password()} change={setPassword}
+                  capture={(element) => { passwordField = element; }} />
               </Show>
             </fieldset>
-            <UploadAction work={uploading()} disabled={busy() || !valid()} progress={progress()}
+            <UploadAction work={uploading()} busy={busy()} empty={!valid()} progress={progress()}
               pointer={uploadPointer()} submitBy={(pointer) => { submitPointer = pointer; }} />
-          </form>
-        </section>
-      }>{(share) => (
-        <section class="compose-view" aria-labelledby="ready-title">
-          <h1 class="compose-heading" id="ready-title">Link ready</h1>
-          <div class="field compose-content link-field" data-motion-shared="">
-            <label for="created-link">Share link</label>
-            <span class="input-row">
-              <input class="mono" readonly id="created-link" value={share.link} />
-              <CopyButton label="Copy link" value={share.link} feedback={toasts.notify} />
-            </span>
           </div>
-          <p class="secondary"><Expiry seconds={share.expiresAt} />.</p>
-          <div class="result-actions">
-            <HoldDelete disabled={busy()} confirm={(pointer) => void removeShare(pointer)} />
-            <IconButton icon="add" label="Create another share" disabled={busy()} onClick={startAgain} />
+          <Feedback feedback={feedback} />
+        </form>
+      </section>
+    }>{(share) => (
+      <section aria-label="Sealed share">
+        <div class="paper folded-paper result-paper" data-motion-shared="" ref={(element) => { folded = element; }}>
+          <Seal />
+          <div class="sealed-link">
+            <input class="mono" readonly id="created-link" aria-label="Share link" value={share.link} />
+            <CopyButton label="Copy link" value={share.link} feedback={feedback.notify} />
           </div>
-          <p class="delete-help" id="delete-help">Hold Delete now to confirm.</p>
-        </section>
-      )}</Show>
-      <ToastStack toasts={toasts} />
-    </>
+        </div>
+        <p class="sentence">Burns after {viewLabel(share.views)} or in{" "}
+          <Expiry seconds={share.expiresAt} label={expiryChoices.find((choice) => choice.value === share.ttl)?.label} />.
+          {" "}Only someone holding this link can read it.</p>
+        <Feedback feedback={feedback} />
+        <div class="result-actions">
+          <button class="quiet-button" type="button" disabled={busy()} onClick={startAgain}>Seal another</button>
+          <HoldDelete disabled={busy()} confirm={(pointer) => void removeShare(pointer)} />
+          <CopyButton primary label="Copy link" value={share.link} feedback={feedback.notify} />
+        </div>
+        <span class="visually-hidden" id="delete-help">Hold Burn now to confirm.</span>
+      </section>
+    )}</Show>
   );
 }

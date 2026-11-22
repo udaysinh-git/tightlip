@@ -31,17 +31,22 @@ function App() {
   return (
     <div class="shell">
       <header>tightlip</header>
-      <main>{path === "/" ? <Compose client={client} /> : <Reveal client={client} path={path} takeFragment={takeFragment} />}</main>
-      <footer>
-        <a href="#">Threat model</a>
-        <IconButton icon={sound() ? "sound" : "mute"} label={sound() ? "Turn sounds off" : "Turn sounds on"}
-          pressed={sound()} onClick={() => {
-            const enabled = !sound();
-            setSound(enabled);
-            setSounds(enabled);
-            if (enabled) playSound("tap");
-          }} />
-      </footer>
+      <div class="desk">
+        <main>{path === "/" ? <Compose client={client} /> : <Reveal client={client} path={path} takeFragment={takeFragment} />}</main>
+        <footer>
+          <span>End-to-end encrypted. The server never sees the secret.</span>
+          <div class="footer-actions">
+            <a href="https://github.com/udaysinh-git/tightlip#threat-model">Threat model</a>
+            <IconButton icon={sound() ? "sound" : "mute"} label={sound() ? "Turn sounds off" : "Turn sounds on"}
+              pressed={sound()} onClick={() => {
+                const enabled = !sound();
+                setSound(enabled);
+                setSounds(enabled);
+                if (enabled) playSound("tap");
+              }} />
+          </div>
+        </footer>
+      </div>
     </div>
   );
 }

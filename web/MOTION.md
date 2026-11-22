@@ -1,24 +1,22 @@
 # Tightlip motion
 
-Enter uses `cubic-bezier(0.22, 1, 0.36, 1)`. Move uses `cubic-bezier(0.25, 1, 0.5, 1)`. The durations below apply to pointer actions. Keyboard actions update immediately and keep their focus rings. Reduced motion and browsers without same-document View Transitions use immediate state changes. The hold confirmation still requires 900 ms.
+Enter uses `cubic-bezier(0.22, 1, 0.36, 1)`. Move uses `cubic-bezier(0.25, 1, 0.5, 1)`. Pointer actions use the timings below. Keyboard actions update immediately and retain focus. With reduced motion, sealing, opening, starting another note, and burning use a 120 ms opacity crossfade. Other changes are immediate. Browsers without same-document View Transitions switch states directly.
 
-| Moment | Timing and curve | Reduced motion |
+| Moment | Timing | Reduced motion |
 | --- | --- | --- |
-| Content tabs | Tab bar's single indicator moves in 180 ms, Move. The content slides 10 px, with a 190 ms Enter and a 145 ms Move exit. The active label swaps in 160 ms, Enter. | Immediate selection |
-| Expiry and views | New value enters vertically in 180 ms, Enter. Old value exits in 120 ms, Move. | Immediate value |
-| Password option | Panel enters from the upper right in 190 ms, Enter, and exits in 140 ms, Move. Password strength uses an instant four-segment readout and a checklist as the person types. | Immediate panel and strength |
-| File drop and removal | Drop zone grows to 1.02 in 180 ms, Move. Its icon lifts 4 px in 180 ms, Enter. New rows enter over 140 ms, Enter, offset by 40 ms per row. The delay caps at 160 ms. The remaining rows move in 180 ms, Move, and removed rows fade in 120 ms. | Static border cue and immediate rows |
-| Create and upload | Press feedback scales to 0.97 in 130 ms, Enter. The button and progress share one transition name. The morph enters in 260 ms, Enter, and exits in 155 ms, Move. The fill moves in 160 ms, Move, from worker upload events. | Immediate meter and progress |
-| Link created | The composer and link field share a transition name. The result enters in 260 ms, Enter, with a 155 ms Move exit. The URL uncovers left to right in 350 ms, Enter. | Immediate result |
-| Copy | The back page moves into the front as both fade. The check enters from 0.8 scale in 150 ms, Enter, holds 1.2 s, then returns in 150 ms. | Immediate check and return |
-| Delete | A linear fill runs for 900 ms and rewinds in 130 ms, Enter. A completed delete enters the empty composer in 260 ms, Enter, with a 155 ms Move exit. | Static hold cue and immediate composer |
-| Reveal | The sealed panel exits in 190 ms, Move. The new panel uncovers top to bottom in 520 ms, Enter. Login rows enter in 180 ms, Enter, spaced by 40 ms. Images fade in over 180 ms after decoding. | Immediate content once ready, including decoded images |
-| Last view | Close share fades and scales the outgoing panel to 0.98 in 400 ms, Move. The lazy dust layer releases grains from the windward edge over the same 400 ms. The gone message enters in the last 180 ms, Enter. Browser navigation clears content on `pagehide`. | Immediate removal |
-| Wrong password | Error message enters in 180 ms, Enter. The focused input moves 4 px in each direction twice over 250 ms. | Border and message only |
-| Show and hide secrets | Eye and mask crossfade in 150 ms, Enter. The field keeps its size. | Immediate mask and icon |
-| Views left | Odometer strips move in 180 ms, Move, with 45 ms between digit columns. The count comes from `/open` after reveal. | Immediate count |
-| Toasts | New messages enter in 180 ms, Enter. The three-item stack fans out on fine-pointer hover in 240 ms, Move. | Static list |
+| Content type | The Tab bar indicator moves in 180 ms, Move. The note content shifts 8 px, entering in 180 ms, Enter, and exiting in 130 ms, Move. | Immediate |
+| Sentence options | The popover enters from its trigger in 150 ms, Enter. Values and the inline password field update directly. | Immediate |
+| Files | The upload icon lifts 4 px in 160 ms, Enter. New thumbnails rise in 140 ms, Enter, and removed ones fade in 120 ms, Move, where element matching is supported. | Static drop cue and immediate thumbnails |
+| Upload | The primary press scales to .97 in 130 ms, Enter. The Sweep button fills in 160 ms, Move, as worker progress arrives. | Immediate progress |
+| Seal | The paper folds into the 120 px strip using a transform FLIP and View Transitions over 320 ms, Move. The wax settles 6 px from scale 1.15 over 180 ms, Enter. The link then writes left to right over 300 ms, Enter. | 120 ms crossfade |
+| Copy | The two pages join and the check scales in over 150 ms, Enter. The check rests for 1.2 s, then returns over 150 ms. | Immediate check and return |
+| Burn hold | Hold for 900 ms to confirm. The fill advances linearly and rewinds in 130 ms, Enter, if released early. | Static holding cue, same hold duration |
+| Break the seal | The wax halves move apart, rotate 12 degrees and fade over 220 ms, Enter. The note unfolds over 320 ms, Move. The Text blur rise brings the content in over 210 ms, Enter. Images fade in after decoding over 180 ms. | 120 ms crossfade once ready |
+| Burn | After a successful owner burn or closing a last view, the full paper fades and scales to .98 over 400 ms, Move. The dust samples paper geometry. The ash or new note fades in during the final 180 ms. Browser navigation clears recipient content on `pagehide`. | 120 ms crossfade |
+| Wrong password | The inline error appears and focus returns to the field. The field shakes 4 px to either side over 250 ms, Enter. | Immediate focus and message |
+| Show or hide a revealed password | The eye and mask crossfade over 150 ms, Enter. The field keeps its size. | Immediate |
+| Views left | The counter rolls from the count shown before opening to the count returned by the server over 180 ms, Move, starting after the unfold. Real text sets the digit baseline and supplies the accessible value. | Immediate |
 
-Tab bar supplies a single moving indicator. Text blur supplies the quiet one-shot arrival through its rise variation. Cheaper transforms, opacity, and clipping preserve those effects within Tightlip's timing and animation rules. The Sweep button's leading edge follows real progress, and Pay button's shared footprint carries the change from action to meter.
+The Bencho Tab bar, Upload dropzone, Sweep button, Copy field, Hold to delete, Text blur, Dust delete, Form error, Password reveal, Password strength, and Rolling counter are adapted under the Bencho Pro licence. The Pay button morph and Toast stack are retired. The tab labels stay visible, the strength checklist gives way to a thin meter, and errors sit underneath the note's sentence.
 
-Sound is off initially. The footer toggle saves only the sound preference. Bencho Nib plays on taps, Check on successful copy, and Toss on closing a last view.
+Sound starts off. The footer toggle saves the sound preference. Bencho Nib plays on taps, Check on successful copy, and Toss on a successful owner burn or when the recipient closes a last view.

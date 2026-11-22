@@ -2,8 +2,8 @@
 import { createSignal } from "solid-js";
 import type { JSX } from "@solidjs/web";
 
-export function TextReveal(props: { children: JSX.Element; capture: (element: HTMLDivElement) => void }) {
-  return <div class="revealed reveal-panel" ref={props.capture}>{props.children}</div>;
+export function TextReveal(props: { children: JSX.Element }) {
+  return <div class="revealed-content">{props.children}</div>;
 }
 
 export function DecodedImage(props: { src: string; name: string; orientation?: number; animate: boolean }) {

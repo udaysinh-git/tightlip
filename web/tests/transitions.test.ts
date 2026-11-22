@@ -16,16 +16,32 @@ describe("View Transitions", () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 
-  it("skips the browser transition for keyboard and reduced motion", async () => {
+  it("skips minor transitions for keyboard and reduced motion", async () => {
     const startViewTransition = vi.fn();
     vi.stubGlobal("document", { startViewTransition });
     vi.stubGlobal("window", { matchMedia: () => ({ matches: true }) });
     const update = vi.fn();
-    await changeView("reveal", update, true);
+    await changeView("forward", update, true);
     vi.stubGlobal("window", { matchMedia: () => ({ matches: false }) });
     await changeView("reveal", update, false);
     expect(update).toHaveBeenCalledTimes(2);
     expect(startViewTransition).not.toHaveBeenCalled();
+  });
+
+  it("uses a view transition for the reduced-motion paper crossfade", async () => {
+    const startViewTransition = vi.fn((update: () => void) => {
+      update();
+      return {
+        ready: Promise.resolve(), finished: Promise.resolve(), updateCallbackDone: Promise.resolve(),
+        skipTransition: vi.fn(),
+      };
+    });
+    vi.stubGlobal("document", { startViewTransition, documentElement: { dataset: {} } });
+    vi.stubGlobal("window", { matchMedia: () => ({ matches: true }) });
+    const update = vi.fn();
+    await changeView("reveal", update, false);
+    expect(startViewTransition).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenCalledOnce();
   });
 
   it("runs Solid updates inside the callback and skips a prior animation on retargeting", async () => {

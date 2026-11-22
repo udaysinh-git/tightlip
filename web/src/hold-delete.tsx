@@ -1,6 +1,5 @@
 // Adapted from Bencho "Hold to delete" (bencho.dev), used under the Bencho Pro licence.
 import { createSignal, onCleanup } from "solid-js";
-import { Icon } from "./icons";
 import { motionAllowed } from "./transitions";
 
 export function HoldDelete(props: { disabled: boolean; confirm: (pointer: boolean) => void }) {
@@ -48,8 +47,7 @@ export function HoldDelete(props: { disabled: boolean; confirm: (pointer: boolea
   });
 
   return (
-    <button type="button" class="icon-button hold-delete" title="Press and hold to delete"
-      aria-label={confirmClick() ? "Confirm deletion" : "Delete now"}
+    <button type="button" class="quiet-button hold-delete" title="Press and hold to burn"
       aria-describedby="delete-help" disabled={props.disabled}
       data-holding={holding() ? "" : undefined} data-animate={animate() ? "" : undefined}
       onPointerDown={(event) => {
@@ -86,8 +84,8 @@ export function HoldDelete(props: { disabled: boolean; confirm: (pointer: boolea
       }}
       onContextMenu={(event) => event.preventDefault()}
       onBlur={cancel}>
-      <Icon name="trash" /> {confirmClick() ? "Confirm deletion" : "Delete now"}
-      <span class="hold-fill" aria-hidden="true"><Icon name="trash" /> Delete now</span>
+      {confirmClick() ? "Confirm burn" : "Burn now"}
+      <span class="hold-fill" aria-hidden="true">Burn now</span>
     </button>
   );
 }
