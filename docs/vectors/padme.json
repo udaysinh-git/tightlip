@@ -1,0 +1,89 @@
+{
+  "suite": "tightlip-v1",
+  "vectors": [
+    {
+      "length": 0,
+      "padded_length": 0
+    },
+    {
+      "length": 1,
+      "padded_length": 1
+    },
+    {
+      "length": 2,
+      "padded_length": 2
+    },
+    {
+      "length": 3,
+      "padded_length": 3
+    },
+    {
+      "length": 15,
+      "padded_length": 16
+    },
+    {
+      "length": 16,
+      "padded_length": 16
+    },
+    {
+      "length": 17,
+      "padded_length": 18
+    },
+    {
+      "length": 31,
+      "padded_length": 32
+    },
+    {
+      "length": 32,
+      "padded_length": 32
+    },
+    {
+      "length": 33,
+      "padded_length": 36
+    },
+    {
+      "length": 63,
+      "padded_length": 64
+    },
+    {
+      "length": 65,
+      "padded_length": 72
+    },
+    {
+      "length": 129,
+      "padded_length": 144
+    },
+    {
+      "length": 257,
+      "padded_length": 272
+    },
+    {
+      "length": 513,
+      "padded_length": 544
+    },
+    {
+      "length": 1025,
+      "padded_length": 1088
+    },
+    {
+      "length": 2049,
+      "padded_length": 2176
+    },
+    {
+      "length": 4097,
+      "padded_length": 4352
+    },
+    {
+      "length": 65535,
+      "padded_length": 65536
+    },
+    {
+      "length": 65536,
+      "padded_length": 65536
+    },
+    {
+      "length": 65537,
+      "padded_length": 67584
+    }
+  ]
+}

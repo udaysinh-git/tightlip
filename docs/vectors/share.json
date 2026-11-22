@@ -1,0 +1,39 @@
+{
+  "blind": "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "kek": "UFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm8",
+  "link_secret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "oprf_key": "BwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "owner_token": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "owner_verifier": "1EeXwWA59Wf3NQE9nsRKvX8UP-dx-rXdCKfEhQtlpXg",
+  "password_salt": "g5UjCaWbc208A4pPU01nww",
+  "share_id": "QEFCQ0RFRkdISUpLTE1OTw",
+  "suite": "tightlip-v1",
+  "vectors": [
+    {
+      "access_tag": "nrM9rwtyKr013hZNh2m0lntL084nwfM5-fxgf5arJgA",
+      "access_verifier": "VJ7sQeVqYCjuA3H0rimdq3zy2gkJA2-D5ah5Z-nDBIc",
+      "blinded": "Lu6jqLbs35dtZmwEUWn9Nhq5SY7tpkhVbQs-gJxfOVw",
+      "evaluated": "iu6VIl3lXuhYSKrnmIH798Qj3Yxeg-F69oDhGqwpEls",
+      "manifest_key": "dN07vM7dgb9JGAGcQeeEqRZ1SpgFyJbaXi-gs5tUBa4",
+      "oprf_input": "GWA6t_vyNtI1PtH5Imi-BXc_xH7PB0Bttl56M5KQwmI",
+      "oprf_output": "LZSzMXziLN5Ygj_Ul_ngz0ZYTHkjqeMTxsqv3HVSSuzzSljgyuxPHGwtS_snoCGDnVcK-ECXHxRQ89MkzN4Wjw",
+      "password": null,
+      "password_flag": 0,
+      "root": "0cpnr0j09DQAIQ_C7Vqk-1bXy2tQePCO54pxSpj3w5E"
+    },
+    {
+      "access_tag": "LxdOVqS9JOSuCgcLtlQjLeO56zP3tQ1iNyK3jFXUCL4",
+      "access_verifier": "GIpQrYvXnfdxjYY3M3KFSYAZDsI1HkXKqCfvnOSKtkE",
+      "blinded": "xsFJjmxR01tmdcQcuKFu7E3FliTj4HX_ZxHj8JQ_9Fs",
+      "evaluated": "mILaR7CNbyszYEW_v4S3ZRdVt5rC-TOspS8nTjM9IBE",
+      "manifest_key": "Z0sRB6t8yH_2aqbRnO6HMSNSwU8iKhJOb8lX3b40nts",
+      "oprf_input": "GbUNIm1OF28ABuUImW6zF01H3bOsa_JHk8tMnmKBCk0",
+      "oprf_output": "RRei0t0pf6_4lV2ZsDYzEC13Gcdbs21lxhwz1VRawDlpAKGSAkq1gwnDB6NqzJubycak8aozhc7eh8ePGiNWNw",
+      "password": "ｔｅｓｔ é",
+      "password_flag": 1,
+      "root": "v24VSAsbN4nKHboyHyS14DYzKKED5IcfqJj09u4AUYc"
+    }
+  ],
+  "wrap_nonce": "cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaH",
+  "wrapped_oprf_key": "cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHDg7WRwpNwrJYgD3PwID_BXVH_KiFOkyVeSnNj95WdYsQTxhi8qz1oHrt-mGZIKxg3F7gbA-3xXWCbqcnoLqgjVbPlodvU8jlC15yVuqwQMQ"
+}

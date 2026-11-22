@@ -1,6 +1,6 @@
-# Ansho protocol, part 1: link shares
+# Tightlip protocol, part 1: link shares
 
-Suite identifier: `ansho-v1`. A client or server that sees any other identifier refuses to proceed. There is no negotiation.
+Suite identifier: `tightlip-v1`. A client or server that sees any other identifier refuses to proceed. There is no negotiation.
 
 ## 1. Threat model
 
@@ -34,7 +34,7 @@ The base cipher is XChaCha20-Poly1305. It does not commit to its key, so every u
 
 ```
 N   = random(24)
-okm = kdf(salt = N, ikm = K, info = "ansho/v1/aead" || lp(A), len = 64)
+okm = kdf(salt = N, ikm = K, info = "tightlip/v1/aead" || lp(A), len = 64)
 Ke  = okm[0..32]
 Kc  = okm[32..64]
 C   = XChaCha20-Poly1305.encrypt(key = Ke, nonce = N, plaintext = P, aad = A)
@@ -51,7 +51,7 @@ Files are encrypted in chunks so they can be processed without holding the whole
 
 ```
 prefix = random(19)
-okm    = kdf(salt = prefix, ikm = Kf, info = "ansho/v1/stream" || lp(A), len = 64)
+okm    = kdf(salt = prefix, ikm = Kf, info = "tightlip/v1/stream" || lp(A), len = 64)
 Ks     = okm[0..32]
 Kc     = okm[32..64]
 header = prefix || Kc                         (51 bytes)
@@ -105,7 +105,7 @@ Without a password, `pw_key` is the empty string and `pw_flag = 0x00`.
 With a password, `pw_flag = 0x01` and:
 
 ```
-salt   = kdf(salt = "", ikm = link_secret, info = "ansho/v1/pw-salt", len = 16)
+salt   = kdf(salt = "", ikm = link_secret, info = "tightlip/v1/pw-salt", len = 16)
 pw_key = Argon2id(password = UTF-8(NFKC(password)), salt = salt,
                   m = 65536 KiB, t = 3, p = 1, len = 32)
 ```
@@ -118,7 +118,7 @@ The OPRF is RFC 9497 `OPRF(ristretto255, SHA-512)` in base mode (mode 0x00).
 
 ```
 oprf_input = kdf(salt = "", ikm = link_secret || pw_key,
-                 info = "ansho/v1/oprf-input" || pw_flag, len = 32)
+                 info = "tightlip/v1/oprf-input" || pw_flag, len = 32)
 blinded    = Blind(oprf_input)                32 bytes, sent to the server
 evaluated  = BlindEvaluate(k, blinded)        32 bytes, returned by the server
 oprf_out   = Finalize(oprf_input, blind, evaluated)   64 bytes
@@ -130,12 +130,12 @@ The server rejects a blinded element that does not decode to a valid non-identit
 
 ```
 root         = kdf(salt = oprf_out, ikm = link_secret || pw_key,
-                   info = "ansho/v1/root" || pw_flag || share_id, len = 32)
-manifest_key = kdf("", root, "ansho/v1/manifest-key", 32)
-access_tag   = kdf("", root, "ansho/v1/access", 32)
+                   info = "tightlip/v1/root" || pw_flag || share_id, len = 32)
+manifest_key = kdf("", root, "tightlip/v1/manifest-key", 32)
+access_tag   = kdf("", root, "tightlip/v1/access", 32)
 
-access_verifier = SHA-256("ansho/v1/access-verifier" || access_tag)
-owner_verifier  = SHA-256("ansho/v1/owner-verifier" || owner_token)
+access_verifier = SHA-256("tightlip/v1/access-verifier" || access_tag)
+owner_verifier  = SHA-256("tightlip/v1/owner-verifier" || owner_token)
 ```
 
 The server stores the two verifiers. It learns `access_tag` only when a client presents it to open the share.
@@ -156,8 +156,8 @@ The manifest is UTF-8 JSON:
 `note`, `login` and `files` are each optional, and at least one is present. Every field of `login` is optional. `size` is the true length before padding. `key` is a fresh random file key.
 
 ```
-manifest_ct = seal(manifest_key, "ansho/v1/manifest" || share_id, pad(manifest_json))
-file_ct[i]  = stream_seal(files[i].key, "ansho/v1/file" || share_id || u32(i), pad(file_bytes))
+manifest_ct = seal(manifest_key, "tightlip/v1/manifest" || share_id, pad(manifest_json))
+file_ct[i]  = stream_seal(files[i].key, "tightlip/v1/file" || share_id || u32(i), pad(file_bytes))
 ```
 
 A client that opens a share rejects a manifest whose `v` is not 1, whose file count differs from the number of blobs the server lists, or whose decrypted file is shorter than its `size`. It truncates each decrypted file to `size`.
@@ -167,7 +167,7 @@ A client that opens a share rejects a manifest whose `v` is not 1, whose file co
 The server holds a 32 byte key encryption key `KEK`, supplied by the environment and never written to the data volume. It stores each OPRF key as:
 
 ```
-k_wrapped = seal(KEK, "ansho/v1/oprf-key" || share_id, k)
+k_wrapped = seal(KEK, "tightlip/v1/oprf-key" || share_id, k)
 ```
 
 ## 7. HTTP API

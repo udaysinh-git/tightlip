@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/core"]
+resolver = "3"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test.package."*"]
+opt-level = 3

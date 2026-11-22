@@ -1,0 +1,33 @@
+{
+  "suite": "tightlip-v1",
+  "vectors": [
+    {
+      "aad": "",
+      "ciphertext": "ICEiIyQlJicoKSorLC0uLzAxMkZTBE3pG7qLl0gYc5_np9ZopGFfGDebo6QaSLNyZsPfQPvWyqQ6584p5keG7tR1og",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "plaintext": "",
+      "prefix": "ICEiIyQlJicoKSorLC0uLzAxMg"
+    },
+    {
+      "aad": "AP8B",
+      "ciphertext": "QEFCQ0RFRkdISUpLTE1OT1BRUoxJ6eI5YdSKOf8xzOHBb0K_oa5v3PxEEcx4O7X433edpmSAX9uuWuaYYnV5iqbJhAJWn3xFWXgxdQ",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "plaintext": "dGVzdABmaWxl",
+      "prefix": "QEFCQ0RFRkdISUpLTE1OT1BRUg"
+    },
+    {
+      "aad": "dHdvIGNodW5rcw",
+      "ciphertext_len": 65620,
+      "ciphertext_sha256": "E5tovqZzy3YLrovpzeqOqE_eF8guOGLXQeJWcZEI_sw",
+      "final_chunk": "BW4H2evEbqR09BQNdtAvpUA",
+      "first_chunk_tag": "Qpc8VmTqIr7OvwWHhNg7Cg",
+      "header": "YGFiY2RlZmdoaWprbG1ub3BxcuoxrUyNPwIxHOSTmf1rRxrjYzNnR4hw1cG0tnEl9Kgi",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "plaintext_repeat": {
+        "byte": 17,
+        "count": 65537
+      },
+      "prefix": "YGFiY2RlZmdoaWprbG1ub3Bxcg"
+    }
+  ]
+}

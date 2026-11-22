@@ -1,14 +1,14 @@
-# Ansho
+# Tightlip
 
-Ansho (暗証, "passcode") shares credentials, text, images and files through end-to-end encrypted links that expire. A full vault with shared collections comes after the links work.
+Tightlip shares credentials, text, images and files through end-to-end encrypted links that expire. A full vault with shared collections comes after the links work.
 
-Working domain: `ansho.dev`. The name is a config value, so a rename touches one file.
+Working domain: `tightlip.dev`. The name is a config value, so a rename touches one file.
 
 ## What it has to beat
 
 In February 2026 an ETH Zurich team published attacks on Bitwarden, LastPass and Dashlane under a malicious-server model (Scarlata, Torrisi, Backendal, Paterson, "Zero Knowledge (About) Encryption", USENIX Security 2026, ePrint 2026/058). Twelve of the attacks hit Bitwarden. The classes they found, plus two older results, are the checklist for this design.
 
-| Weakness in existing tools | Source | What Ansho does |
+| Weakness in existing tools | Source | What Tightlip does |
 | --- | --- | --- |
 | The server sends KDF settings, so it can lower them | ePrint 2026/058 | KDF parameters are constants of the suite, compiled into the client. The server never supplies them. |
 | Integrity per field only, so the server can cut and paste ciphertexts | ePrint 2026/058 | Every ciphertext is bound through its associated data to the suite, share or vault id, object id and role. |
@@ -21,16 +21,16 @@ In February 2026 an ETH Zurich team published attacks on Bitwarden, LastPass and
 | Harvest now, decrypt later | NIST FIPS 203 | Link shares are symmetric only (256 bit). Vault sharing uses X-Wing, the X25519 plus ML-KEM-768 hybrid. |
 | A stolen server database can be brute forced | common design | Accounts use OPAQUE (RFC 9807) plus a 256 bit secret key that stays on the device. The server holds nothing that can be guessed offline. |
 
-No web app can fully solve one problem: the server delivers the JavaScript that does the encryption. Ansho narrows it with a static bundle, a strict CSP, Trusted Types, subresource integrity, no third party origins and reproducible builds with published hashes. The manifest format follows the WAICT proposal (Mozilla and Cloudflare, prototype in Firefox Nightly since May 2026) so browsers can enforce it once that ships. A CLI and a browser extension close the gap for people who need it closed.
+No web app can fully solve one problem: the server delivers the JavaScript that does the encryption. Tightlip narrows it with a static bundle, a strict CSP, Trusted Types, subresource integrity, no third party origins and reproducible builds with published hashes. The manifest format follows the WAICT proposal (Mozilla and Cloudflare, prototype in Firefox Nightly since May 2026) so browsers can enforce it once that ships. A CLI and a browser extension close the gap for people who need it closed.
 
-Ansho has had no outside audit. Until it has one, the README says so and makes no claim of being stronger than audited products.
+Tightlip has had no outside audit. Until it has one, the README says so and makes no claim of being stronger than audited products.
 
 ## Stack
 
 | Part | Choice | Reason |
 | --- | --- | --- |
-| Crypto core | Rust crate `ansho-core`, RustCrypto primitives, `voprf` and `opaque-ke` | One implementation for browser, server, CLI and later mobile. Memory safe, `forbid(unsafe_code)`. |
-| Browser crypto | `ansho-core` compiled to WebAssembly, run in a Web Worker | Same code and test vectors as native. Keeps the page responsive during Argon2id. |
+| Crypto core | Rust crate `tightlip-core`, RustCrypto primitives, `voprf` and `opaque-ke` | One implementation for browser, server, CLI and later mobile. Memory safe, `forbid(unsafe_code)`. |
+| Browser crypto | `tightlip-core` compiled to WebAssembly, run in a Web Worker | Same code and test vectors as native. Keeps the page responsive during Argon2id. |
 | Web app | Solid 2.0 with Vite, static SPA, TypeScript strict, plain CSS | No server rendering: a static bundle can be hashed, pinned and reproduced. |
 | Server | Rust, axum, tokio, one binary that also serves the web bundle | Small memory use and fast cold start on the KuroPanel box. |
 | Metadata store | SQLite (WAL, `secure_delete`) behind a storage trait | No database port to expose. Postgres can sit behind the same trait later. |
@@ -51,13 +51,13 @@ Each milestone ends with its gate passing. The next one does not start before th
 
 `crates/core` implements `docs/SPEC.md` sections 2 to 6: KDF labels, committing AEAD, STREAM, Padmé, the OPRF wrappers and the link share key schedule, for both client and server roles.
 
-Gate: `cargo test -p ansho-core` and `cargo clippy --all-targets -- -D warnings` pass. Tests include known answer vectors frozen in `docs/vectors/`, property tests for round trips, tamper tests on every region of a ciphertext, key commitment tests, and STREAM truncation, reorder and duplicate tests.
+Gate: `cargo test -p tightlip-core` and `cargo clippy --all-targets -- -D warnings` pass. Tests include known answer vectors frozen in `docs/vectors/`, property tests for round trips, tamper tests on every region of a ciphertext, key commitment tests, and STREAM truncation, reorder and duplicate tests.
 
 ### M2: server
 
 `crates/server` implements the API in SPEC section 7 with SQLite and disk blobs, the expiry sweeper, rate limits, security headers and `/healthz`.
 
-Gate: integration tests drive a full create, eval, open, download and delete cycle over HTTP using `ansho-core` as the client. They prove that a view limit holds under 50 concurrent opens, that missing, expired and burned shares are indistinguishable, and that no OPRF key or blob survives expiry.
+Gate: integration tests drive a full create, eval, open, download and delete cycle over HTTP using `tightlip-core` as the client. They prove that a view limit holds under 50 concurrent opens, that missing, expired and burned shares are indistinguishable, and that no OPRF key or blob survives expiry.
 
 ### M3: web app
 
@@ -87,4 +87,4 @@ Passkey sign in through the WebAuthn PRF extension, CLI, browser extension, key 
 
 The licence (AGPL-3.0 like the Bitwarden server, or Apache-2.0) is undecided and no licence file ships until it is.
 
-`ansho.dev` and `ansho.app` were unregistered on 2026-11-22. The registrar checkout confirms whether the registry prices them as standard.
+`tightlip.dev` and `tightlip.app` were unregistered on 2026-11-22. The registrar checkout confirms whether the registry prices them as standard.

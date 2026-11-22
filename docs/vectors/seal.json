@@ -1,0 +1,19 @@
+{
+  "suite": "tightlip-v1",
+  "vectors": [
+    {
+      "aad": "",
+      "ciphertext": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3q-opX9rS3B4Ucd21DEndBzvOQXAyBYh9rsbHl79PxnSj0RmXe9C7oShOpMoBQagW",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3",
+      "plaintext": ""
+    },
+    {
+      "aad": "AP8B",
+      "ciphertext": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX3ctHFdZsK_CjdAlScJkXq7By_mAGP17rxJsSYmYMWHpFoeyiGhfqYzjFHod6NzfxTIa3QGnBLtqjGT9zkzA",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "nonce": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX",
+      "plaintext": "dGVzdABwbGFpbnRleHQ"
+    }
+  ]
+}

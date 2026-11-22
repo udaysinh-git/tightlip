@@ -1,0 +1,68 @@
+{
+  "suite": "tightlip-v1",
+  "vectors": [
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvYWVhZAAAAAMA_wE",
+      "label": "tightlip/v1/aead",
+      "output": "gimAEFfAOxkHaSTh_4lYcKvdHcGLRYuY6-N7EE9oKuub_gQIaY6GLLgOhrZ9GLq51Hg_LFIqChvC39JzLZtldQ",
+      "salt": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3"
+    },
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvc3RyZWFtAAAAAwD_AQ",
+      "label": "tightlip/v1/stream",
+      "output": "2RMsymlJX0v83Os2ssEZDUO-jQr22Ntk7v1FrXt0DISMSeniOWHUijn_MczhwW9Cv6Gub9z8RBHMeDu1-N93nQ",
+      "salt": "QEFCQ0RFRkdISUpLTE1OT1BRUg"
+    },
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvcHctc2FsdA",
+      "label": "tightlip/v1/pw-salt",
+      "output": "g5UjCaWbc208A4pPU01nww",
+      "salt": ""
+    },
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvb3ByZi1pbnB1dAA",
+      "label": "tightlip/v1/oprf-input",
+      "output": "GWA6t_vyNtI1PtH5Imi-BXc_xH7PB0Bttl56M5KQwmI",
+      "salt": ""
+    },
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvcm9vdAAgISIjJCUmJygpKissLS4v",
+      "label": "tightlip/v1/root",
+      "output": "qd_23OuLWo3LW4CJD2s6_qTAR8t9ad3cLkwJaR94Cv0",
+      "salt": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-fw"
+    },
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvb3ByZi1pbnB1dAE",
+      "label": "tightlip/v1/oprf-input",
+      "output": "_cc9xVTlsCkLHKD7VR-qyuD_5UnsOWG1O3tlIafEpjA",
+      "salt": ""
+    },
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvcm9vdAEgISIjJCUmJygpKissLS4v",
+      "label": "tightlip/v1/root",
+      "output": "Ym2skMRvDR6uOUlBT0eZ0JowZL0LYBlqhK2IODJSYY4",
+      "salt": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-fw"
+    },
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvbWFuaWZlc3Qta2V5",
+      "label": "tightlip/v1/manifest-key",
+      "output": "b-wLCjjnmuapTOJLTeA4yRXQf_GQoNftTWAkiEC1HMo",
+      "salt": ""
+    },
+    {
+      "ikm": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "info": "dGlnaHRsaXAvdjEvYWNjZXNz",
+      "label": "tightlip/v1/access",
+      "output": "msSlDy4e7mzuAFypKR0n8PcQEdahKefTadXf93CNZAY",
+      "salt": ""
+    }
+  ]
+}
