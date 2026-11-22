@@ -44,7 +44,9 @@ if (parsed.scheme != "https" and not (
     sys.exit("Use an HTTPS origin or a loopback HTTP origin.")
 release = json.loads(Path(manifest).read_text(encoding="utf-8"))
 commit = release.get("commit", "")
-if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+if commit == "unknown":
+    print("Warning: this release.json names no commit, so it cannot be tied to source.", file=sys.stderr)
+elif not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
     sys.exit("Invalid release commit.")
 files = release.get("files")
 if not isinstance(files, dict) or "index.html" not in files:

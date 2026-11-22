@@ -28,8 +28,12 @@ async function gitMetadata() {
   }
 }
 
-const { commit, dirty } = supplied === undefined ? await gitMetadata() : { commit: supplied, dirty: false };
-if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error("Set TIGHTLIP_RELEASE_COMMIT to the full source commit SHA.");
+// Docker builds without a commit argument (the hosting panel passes none) still publish file hashes;
+// the commit is then recorded as "unknown" and the manifest cannot be tied to a tag.
+const { commit, dirty } = supplied === undefined ? await gitMetadata().catch(() => ({ commit: "unknown", dirty: false }))
+  : supplied === "" ? { commit: "unknown", dirty: false } : { commit: supplied, dirty: false };
+if (commit !== "unknown" && !/^[0-9a-f]{40}$/.test(commit)) throw new Error("TIGHTLIP_RELEASE_COMMIT must be a full 40 character commit SHA.");
+if (commit === "unknown") console.warn("release.json: no commit given, recording \"unknown\".");
 const files = {};
 const paths = (await readdir(dist, { recursive: true, withFileTypes: true }))
   .filter((entry) => entry.isFile())
