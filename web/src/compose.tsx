@@ -13,6 +13,7 @@ import { UploadAction } from "./upload-action";
 import { UploadDropzone } from "./upload-dropzone";
 import type { PickedFile } from "./upload-dropzone";
 import { changeView, paperDust } from "./transitions";
+import { sealedEvent } from "./logo";
 import { playSound } from "./share-sounds";
 import { supportedImage } from "./image-types";
 import { limits } from "./wire";
@@ -141,6 +142,7 @@ export function Compose(props: { client: CryptoClient }) {
         setViews(1);
         clearFiles();
       }, pointer);
+      document.dispatchEvent(new Event(sealedEvent));
       if (!pointer) document.getElementById("created-link")?.focus({ preventScroll: true });
     } catch (cause) {
       flush(() => {
