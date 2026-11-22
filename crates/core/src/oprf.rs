@@ -49,8 +49,7 @@ pub(crate) fn blind_with_scalar(
 }
 
 fn blind_inner(input: &[u8], blind: Secret32) -> Result<([u8; 32], ClientState), OprfError> {
-    // voprf 0.5 uses rand_core 0.6. Supply a sampled scalar from the current
-    // dalek crate through the library's checked canonical scalar decoder.
+    // Supply the sampled scalar through the library's checked canonical decoder.
     let scalar =
         Ristretto255::deserialize_scalar(blind.as_bytes()).map_err(|_| OprfError::InvalidInput)?;
     let exchange = Client::deterministic_blind_unchecked(input, scalar)

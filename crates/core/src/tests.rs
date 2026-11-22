@@ -476,6 +476,39 @@ fn manifest_rejects_invalid_version_absence_encoding_and_padding() {
 }
 
 #[test]
+fn manifest_treats_empty_optional_sections_as_absent() {
+    let key = sample_key();
+    let id = [5; 16];
+    let aad = share::share_aad(labels::MANIFEST, &id);
+    for json in [
+        br#"{"v":1,"note":""}"#.as_slice(),
+        br#"{"v":1,"login":{}}"#,
+        br#"{"v":1,"files":[]}"#,
+        br#"{"v":1,"note":"","login":{},"files":[]}"#,
+    ] {
+        let manifest = serde_json::from_slice(json).unwrap();
+        assert!(matches!(
+            manifest::seal_manifest(&key, &id, &manifest),
+            Err(manifest::PayloadSealError::InvalidPayload)
+        ));
+        let padded = pad::pad(json, pad::MANIFEST_FLOOR).unwrap();
+        let ciphertext = aead::seal(&key, &aad, padded.as_bytes()).unwrap();
+        assert!(matches!(
+            manifest::open_manifest(&key, &id, &ciphertext, 0),
+            Err(OpenError)
+        ));
+    }
+    let manifest = Manifest {
+        v: VERSION,
+        note: Some("content".into()),
+        login: Some(Login::default()),
+        files: Some(Vec::new()),
+    };
+    let ciphertext = manifest::seal_manifest(&key, &id, &manifest).unwrap();
+    assert!(manifest::open_manifest(&key, &id, &ciphertext, 0).is_ok());
+}
+
+#[test]
 fn file_open_enforces_minimum_true_size_and_truncates() {
     let id = [5; 16];
     let mut entry = FileEntry {

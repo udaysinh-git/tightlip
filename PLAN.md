@@ -2,7 +2,7 @@
 
 Tightlip shares credentials, text, images and files through end-to-end encrypted links that expire. A full vault with shared collections comes after the links work.
 
-Working domain: `tightlip.dev`. The name is a config value, so a rename touches one file.
+Deployed at `tightlip.buildwithkuro.tech` on KuroPanel. `tightlip.dev` is the domain to buy later. The name is a config value, so a rename touches one file.
 
 ## What it has to beat
 

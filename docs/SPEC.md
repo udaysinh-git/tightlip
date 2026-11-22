@@ -226,10 +226,10 @@ Errors return JSON `{"error": "<code>"}` with exactly these pairs:
 
 | Status | Code | When |
 | --- | --- | --- |
-| 400 | `bad_request` | malformed JSON, encoding, suite or value out of range |
+| 400 | `bad_request` | malformed JSON, unknown fields, wrong `Content-Type`, bad encoding, wrong suite or a value out of range |
 | 401 | `unauthorized` | wrong access tag, upload token, grant or owner token on a live share |
 | 404 | `not_found` | every missing, expired, burned or pending share on a recipient route, and unknown routes |
-| 409 | `conflict` | upload to a committed share, file index out of order, commit twice |
+| 409 | `conflict` | file index out of order on a pending share. Uploads and commits on a share that is already committed return `404`, since its upload token no longer exists. |
 | 413 | `too_large` | a size or count limit |
 | 429 | `rate_limited` | the create limit, with a `Retry-After` header in seconds |
 

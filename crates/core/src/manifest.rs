@@ -65,7 +65,25 @@ pub enum PayloadSealError {
 
 impl Manifest {
     fn is_valid(&self) -> bool {
-        self.v == VERSION && (self.note.is_some() || self.login.is_some() || self.files.is_some())
+        self.v == VERSION
+            && (self.note.as_ref().is_some_and(|note| !note.is_empty())
+                || self.login.as_ref().is_some_and(Login::has_fields)
+                || self.files.as_ref().is_some_and(|files| !files.is_empty()))
+    }
+}
+
+impl Login {
+    fn has_fields(&self) -> bool {
+        [
+            &self.title,
+            &self.username,
+            &self.password,
+            &self.url,
+            &self.totp,
+            &self.note,
+        ]
+        .iter()
+        .any(|field| field.is_some())
     }
 }
 
