@@ -142,3 +142,7 @@ The build writes `web/dist/release.json` and the server exposes it at
 `bash scripts/verify-live.sh <origin> <release.json>` with a trusted manifest
 to verify the deployed index and assets. Signing the manifest and publishing
 it outside the deployment are separate manual release steps.
+
+## Licence
+
+Tightlip is licensed under the [GNU Affero General Public License v3.0 only](LICENSE). If you run a modified version as a network service, you must offer its source to the people who use it. Some interaction code in `web/src` is adapted from Bencho blocks and is covered by the Bencho Pro licence instead; see [NOTICE.md](NOTICE.md).
