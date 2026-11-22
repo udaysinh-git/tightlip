@@ -58,12 +58,12 @@ impl Default for Limits {
 }
 
 impl Config {
+    pub fn port_from_env() -> Result<u16, ConfigError> {
+        number(&read_env, "PORT", 8080)
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
-        let get = |name| match env::var(name) {
-            Ok(value) => Ok(Some(value)),
-            Err(env::VarError::NotPresent) => Ok(None),
-            Err(env::VarError::NotUnicode(_)) => Err(ConfigError(name)),
-        };
+        let get = read_env;
         let kek = value(&get, "TIGHTLIP_KEK", |value| {
             decode_secret(&Zeroizing::new(value))
         })?
@@ -117,7 +117,7 @@ impl Config {
         limits.creates_per_ip = number(&get, "TIGHTLIP_CREATES_PER_IP", limits.creates_per_ip)?;
 
         Ok(Self {
-            port: value(&get, "PORT", |value| value.parse().ok())?.unwrap_or(8080),
+            port: Self::port_from_env()?,
             data_dir: get("TIGHTLIP_DATA_DIR")?.map_or_else(|| "./data".into(), PathBuf::from),
             web_dir: get("TIGHTLIP_WEB_DIR")?.map_or_else(|| "./web/dist".into(), PathBuf::from),
             public_url: get("TIGHTLIP_PUBLIC_URL")?,
@@ -125,6 +125,14 @@ impl Config {
             trust_proxy: get("TIGHTLIP_TRUST_PROXY")?.as_deref() == Some("1"),
             limits,
         })
+    }
+}
+
+fn read_env(name: &'static str) -> Result<Option<String>, ConfigError> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(ConfigError(name)),
     }
 }
 

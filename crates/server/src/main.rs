@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    env,
     future::Future,
-    io,
-    net::{Ipv4Addr, SocketAddr},
+    io::{self, Read, Write},
+    net::{Ipv4Addr, SocketAddr, TcpStream},
     process::ExitCode,
     sync::Arc,
     time::Duration,
@@ -30,14 +31,24 @@ enum Error {
     Io(#[from] io::Error),
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    if env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--healthcheck")
+    {
+        return if Config::port_from_env().is_ok_and(|port| probe_health(port).unwrap_or(false)) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+
     tracing_subscriber::fmt()
         .without_time()
         .with_target(false)
         .with_level(false)
         .init();
-    match run().await {
+    match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("tightlip: {error}");
@@ -46,6 +57,24 @@ async fn main() -> ExitCode {
     }
 }
 
+fn probe_health(port: u16) -> io::Result<bool> {
+    const OK: &[u8] = b"HTTP/1.1 200 ";
+    let timeout = Duration::from_secs(2);
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut stream = TcpStream::connect_timeout(&address, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    write!(
+        stream,
+        "GET /healthz HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+    )?;
+
+    let mut status = [0; OK.len()];
+    stream.read_exact(&mut status)?;
+    Ok(status == OK)
+}
+
+#[tokio::main]
 async fn run() -> Result<(), Error> {
     let config = Config::from_env()?;
     let port = config.port;
