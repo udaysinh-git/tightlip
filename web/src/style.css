@@ -62,9 +62,63 @@ fieldset { padding: 0; margin: 0; border: 0; min-inline-size: 0; }
   grid-template-rows: auto 1fr;
 }
 
-header { display: flex; align-items: center; gap: 8px; padding-block-start: 26px; font-size: 15px; font-weight: 500; }
-/* The wordmark carries a drop of the same wax. */
-header::before { content: ""; inline-size: 8px; block-size: 8px; border-radius: 52% 47% 50% 46%; background: var(--seal); }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block-start: 20px; }
+nav { display: flex; align-items: center; gap: 10px; }
+nav .icon-button[aria-current="page"] { color: var(--ink); background: var(--well); }
+.nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-block-size: 36px;
+  padding-inline: 4px;
+  border-radius: 6px;
+  color: var(--secondary);
+  font-size: 14px;
+  text-decoration: none;
+}
+.nav-link svg { inline-size: 14px; block-size: 14px; color: var(--faint); }
+
+/* The wordmark's two i's are dotless; their dots are drops of the same wax as the seal. */
+.logo { display: inline-flex; align-items: center; min-block-size: 36px; border-radius: 6px; color: var(--ink); text-decoration: none; }
+.wordmark { font-size: 19px; font-weight: 650; letter-spacing: 0; line-height: 1; }
+.tittle { position: relative; display: inline-block; }
+.tittle::before {
+  content: "";
+  position: absolute;
+  inset-block-start: .07em;
+  inset-inline-start: 50%;
+  inline-size: .2em;
+  block-size: .2em;
+  margin-inline-start: -.1em;
+  border-radius: 52% 47% 50% 46% / 48% 52% 46% 50%;
+  background: var(--seal);
+  transform-origin: 50% 100%;
+}
+
+.security { padding-block: 30px 26px; }
+.security h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; text-wrap: balance; }
+.security h2 { margin: 30px 0 8px; font-size: 15px; font-weight: 600; }
+.security p, .security li { color: var(--secondary); font-size: 15px; line-height: 1.6; }
+.security .lead { margin-block-start: 8px; max-inline-size: 56ch; text-wrap: pretty; }
+.security ol, .security ul { margin: 0; padding-inline-start: 20px; display: grid; gap: 6px; }
+.security li::marker { color: var(--faint); }
+.link-anatomy { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 0; margin: 24px 0 0; }
+.link-half { min-inline-size: 0; padding-block-start: 10px; border-block-start: 2px solid var(--line); }
+.link-half code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font: 14px / 1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+.link-half figcaption { margin-block-start: 4px; padding-inline-end: 16px; color: var(--secondary); font-size: 13px; line-height: 1.45; }
+.link-key { border-block-start-color: var(--seal); }
+.ledger { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
+.ledger ul { list-style: none; padding: 0; gap: 2px; }
+.security-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-block-start: 30px; }
+.security-foot span { font-size: 13px; color: var(--faint); }
+.desk[data-page="security"] { justify-content: flex-start; }
 
 .desk {
   display: flex;
@@ -482,12 +536,16 @@ svg { flex: none; }
   .icon-button:hover:not(:disabled) { background: var(--well); color: var(--ink); }
   .file-preview .icon-button:hover:not(:disabled) { background: var(--paper); }
   .sentence-button:hover span, .quiet-button:hover, footer a:hover { color: var(--ink); text-decoration-color: currentColor; }
+  .nav-link:hover, .nav-link:hover svg { color: var(--ink); }
   .choice-option:hover { background: var(--paper); color: var(--ink); }
   button.primary:hover:not(:disabled, [aria-disabled="true"]) { background: var(--seal-hover); }
 }
 
 @media (max-width: 540px) {
-  header { padding-block-start: 17px; }
+  header { padding-block-start: 12px; }
+  .link-anatomy, .ledger { grid-template-columns: minmax(0, 1fr); }
+  .link-half + .link-half { margin-block-start: 14px; }
+  .security { padding-block: 24px 20px; }
   .desk { justify-content: flex-start; padding-block: 18px 26px; }
   .compose-foot { flex-direction: column; align-items: stretch; }
   .compose-foot .primary-slot > * { inline-size: 100%; }
