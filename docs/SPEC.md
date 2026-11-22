@@ -1,0 +1,231 @@
+# Ansho protocol, part 1: link shares
+
+Suite identifier: `ansho-v1`. A client or server that sees any other identifier refuses to proceed. There is no negotiation.
+
+## 1. Threat model
+
+The server is assumed malicious for confidentiality and integrity of content: it may read, alter, replay, swap or withhold anything it stores, and it sees all traffic after TLS. It must still learn nothing about a share's content, file names, types or password, and any alteration must be detected by the client.
+
+The server is trusted for three things it alone can do: counting views, refusing requests after expiry, and destroying keys on time. A malicious server can ignore limits for itself, but it gains nothing by doing so because it never holds the link secret.
+
+Out of scope for part 1: a recipient who copies the plaintext after a legitimate view, malware on either endpoint, and a server that serves altered JavaScript (see section 8 for the mitigations in place).
+
+Security goals when the server is honest:
+
+1. A share cannot be read after its expiry or after its last view, even by someone who holds the full link and a copy of the ciphertext taken earlier, unless they also completed an OPRF evaluation while the share was live.
+2. Guessing a share password requires one request to the server per guess, and the server destroys the share after a fixed number of evaluations.
+3. A database or disk backup taken without the server's key encryption key reveals no OPRF keys.
+
+## 2. Conventions
+
+Integers are big-endian. `u32(n)` is four bytes. `lp(x)` is `u32(len(x)) || x`. `||` is concatenation. Labels are ASCII without a terminator. Text encodings of bytes use base64url without padding.
+
+`kdf(salt, ikm, info, len)` is HKDF-SHA-512 (RFC 5869), extract then expand. An empty salt is the empty string.
+
+Random bytes come from the operating system CSPRNG (`getrandom`).
+
+Secrets are zeroized on drop. Comparisons of secrets and tags are constant time (`subtle`).
+
+## 3. Committing AEAD
+
+The base cipher is XChaCha20-Poly1305. It does not commit to its key, so every use goes through this wrapper, which commits to key, nonce and associated data.
+
+`seal(K, A, P)` with a 32 byte key `K`, associated data `A` of at most 1024 bytes, and plaintext `P`:
+
+```
+N   = random(24)
+okm = kdf(salt = N, ikm = K, info = "ansho/v1/aead" || lp(A), len = 64)
+Ke  = okm[0..32]
+Kc  = okm[32..64]
+C   = XChaCha20-Poly1305.encrypt(key = Ke, nonce = N, plaintext = P, aad = A)
+out = N || Kc || C
+```
+
+`open(K, A, out)` splits `out`, recomputes `okm`, compares `Kc` in constant time and fails before any decryption if it differs, then decrypts. Output shorter than 24 + 32 + 16 bytes fails. All failures return the same error.
+
+## 4. STREAM for files
+
+Files are encrypted in chunks so they can be processed without holding the whole file in memory. The construction is STREAM (Hoang, Reyhanitabar, Rogaway, Vizár, CRYPTO 2015).
+
+`stream_seal(Kf, A, plaintext)` with a 32 byte file key `Kf` used for exactly one file:
+
+```
+prefix = random(19)
+okm    = kdf(salt = prefix, ikm = Kf, info = "ansho/v1/stream" || lp(A), len = 64)
+Ks     = okm[0..32]
+Kc     = okm[32..64]
+header = prefix || Kc                         (51 bytes)
+```
+
+The plaintext is split into chunks of 65536 bytes. The last chunk holds the remaining 0 to 65536 bytes and always exists, so an empty plaintext is one empty chunk, and a plaintext whose length is a multiple of 65536 ends with a full chunk marked final. Chunk `i`, counted from 0:
+
+```
+nonce_i = prefix || u32(i) || (0x01 if final else 0x00)
+ct_i    = XChaCha20-Poly1305.encrypt(key = Ks, nonce = nonce_i, plaintext = chunk_i, aad = A)
+```
+
+The output is `header || ct_0 || ct_1 || ...`. Every chunk ciphertext is 16 bytes longer than its plaintext. A stream has at most 2^32 - 1 chunks.
+
+Decryption checks `Kc` first. It fails if any chunk fails, if the input ends before a chunk marked final, or if bytes follow the final chunk. The API is incremental (init, update, finish) on both sides, and decrypted bytes of a chunk are released only after that chunk authenticates.
+
+## 5. Padding
+
+`padme(L)` (Nikitin et al., PETS 2019), for `L >= 2`:
+
+```
+E    = floor(log2(L))
+S    = floor(log2(E)) + 1
+mask = (1 << (E - S)) - 1
+padme(L) = (L + mask) & ~mask
+```
+
+For `L < 2`, `padme(L) = L`.
+
+To pad a byte string of length `L` to a target `T > L`: append `0x80`, then zero bytes up to `T`. To unpad: strip trailing zeros, require and remove the final `0x80`.
+
+The manifest is padded to `T = max(512, padme(L + 1))`. A file is padded to `T = padme(L + 1)` before `stream_seal`.
+
+## 6. Link share key schedule
+
+### 6.1 Secrets
+
+```
+link_secret = random(32)        in the URL fragment, never sent to the server
+share_id    = random(16)        chosen by the server, public to link holders
+owner_token = random(32)        kept by the creator, used to delete the share
+k           = OPRF private key  generated by the server per share
+```
+
+The link is `https://<host>/s/<b64url(share_id)>#<b64url(link_secret)>`.
+
+### 6.2 Password
+
+Without a password, `pw_key` is the empty string and `pw_flag = 0x00`.
+
+With a password, `pw_flag = 0x01` and:
+
+```
+salt   = kdf(salt = "", ikm = link_secret, info = "ansho/v1/pw-salt", len = 16)
+pw_key = Argon2id(password = UTF-8(NFKC(password)), salt = salt,
+                  m = 65536 KiB, t = 3, p = 1, len = 32)
+```
+
+The Argon2id parameters are constants of the suite. They are never read from the server or from the link.
+
+### 6.3 OPRF
+
+The OPRF is RFC 9497 `OPRF(ristretto255, SHA-512)` in base mode (mode 0x00).
+
+```
+oprf_input = kdf(salt = "", ikm = link_secret || pw_key,
+                 info = "ansho/v1/oprf-input" || pw_flag, len = 32)
+blinded    = Blind(oprf_input)                32 bytes, sent to the server
+evaluated  = BlindEvaluate(k, blinded)        32 bytes, returned by the server
+oprf_out   = Finalize(oprf_input, blind, evaluated)   64 bytes
+```
+
+The server rejects a blinded element that does not decode to a valid non-identity point.
+
+### 6.4 Keys
+
+```
+root         = kdf(salt = oprf_out, ikm = link_secret || pw_key,
+                   info = "ansho/v1/root" || pw_flag || share_id, len = 32)
+manifest_key = kdf("", root, "ansho/v1/manifest-key", 32)
+access_tag   = kdf("", root, "ansho/v1/access", 32)
+
+access_verifier = SHA-256("ansho/v1/access-verifier" || access_tag)
+owner_verifier  = SHA-256("ansho/v1/owner-verifier" || owner_token)
+```
+
+The server stores the two verifiers. It learns `access_tag` only when a client presents it to open the share.
+
+### 6.5 Manifest
+
+The manifest is UTF-8 JSON:
+
+```json
+{
+  "v": 1,
+  "note": "optional free text",
+  "login": { "title": "", "username": "", "password": "", "url": "", "totp": "", "note": "" },
+  "files": [ { "name": "scan.png", "mime": "image/png", "size": 48213, "key": "<b64url 32 bytes>" } ]
+}
+```
+
+`note`, `login` and `files` are each optional, and at least one is present. Every field of `login` is optional. `size` is the true length before padding. `key` is a fresh random file key.
+
+```
+manifest_ct = seal(manifest_key, "ansho/v1/manifest" || share_id, pad(manifest_json))
+file_ct[i]  = stream_seal(files[i].key, "ansho/v1/file" || share_id || u32(i), pad(file_bytes))
+```
+
+A client that opens a share rejects a manifest whose `v` is not 1, whose file count differs from the number of blobs the server lists, or whose decrypted file is shorter than its `size`. It truncates each decrypted file to `size`.
+
+### 6.6 Server key storage
+
+The server holds a 32 byte key encryption key `KEK`, supplied by the environment and never written to the data volume. It stores each OPRF key as:
+
+```
+k_wrapped = seal(KEK, "ansho/v1/oprf-key" || share_id, k)
+```
+
+## 7. HTTP API
+
+All paths are under `/api/v1`. JSON bodies are small and capped at 16 kB. Binary bodies are `application/octet-stream`. Every API response carries `Cache-Control: no-store`.
+
+A share is in one of two states: pending (created, content not yet committed) or live. A share that is missing, expired, burned or still pending answers every recipient request with the same `404` and the same body, in the same time.
+
+| Request | Body | Effect |
+| --- | --- | --- |
+| `POST /shares` | `{suite, blinded, ttl_seconds, max_views, has_password}` | Creates a pending share and its OPRF key. Returns `201 {id, evaluated, upload_token, expires_at}`. This evaluation is not counted. |
+| `PUT /shares/{id}/manifest` | `manifest_ct` | Needs `Authorization: Bearer <upload_token>`. Pending shares only. |
+| `PUT /shares/{id}/files/{n}` | `file_ct[n]`, streamed | Same auth. `n` counts from 0 with no gaps. |
+| `POST /shares/{id}/commit` | `{access_verifier, owner_verifier}` | Same auth. Makes the share live and invalidates the upload token. |
+| `GET /shares/{id}` | none | Returns `{suite, has_password, expires_at, views_left}`. Changes nothing. |
+| `POST /shares/{id}/eval` | `{blinded}` | Spends one attempt. Returns `{evaluated, attempts_left}`. When attempts reach zero the share is destroyed. |
+| `POST /shares/{id}/open` | `{access_tag}` | If the tag matches the verifier and a view remains, spends one view atomically and returns `{manifest, files: [{n, size}], grant}`. A wrong tag returns `401` and spends nothing. |
+| `GET /shares/{id}/files/{n}` | none | Needs `Authorization: Bearer <grant>`. A grant lasts 10 minutes. |
+| `DELETE /shares/{id}` | none | Needs `Authorization: Bearer <b64url(owner_token)>`. Destroys the share. |
+
+Limits, all configurable by environment with these defaults:
+
+| Limit | Default |
+| --- | --- |
+| `ttl_seconds` | 300 to 2592000 (5 minutes to 30 days) |
+| `max_views` | 1 to 100 |
+| Attempts | `max_views + 5` with a password, `max_views + 3` without |
+| Manifest ciphertext | 256 kB |
+| Files per share | 20 |
+| Total ciphertext per share | 100 MB |
+| Pending share lifetime | 15 minutes |
+| Creates per IP | 30 per hour, token bucket held in memory only |
+
+Destroying a share means, in this order: delete the wrapped OPRF key, delete the row, unlink the blobs. When the last view is spent the OPRF key and manifest go at once, and the file blobs go when the grant expires. A sweeper destroys expired and stale pending shares at least once a minute, and every request checks expiry itself so the sweeper's timing does not matter for correctness.
+
+The server never logs a share id together with an IP address, never logs request bodies, tokens or tags, and does not persist IP addresses.
+
+## 8. Web delivery
+
+The web app is a static bundle with content hashed file names. The server sends these headers on every response:
+
+```
+Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; media-src blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'
+Referrer-Policy: no-referrer
+X-Content-Type-Options: nosniff
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+Cross-Origin-Resource-Policy: same-origin
+Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()
+Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+```
+
+The page loads nothing from another origin: no fonts, analytics, CDNs or embeds. Every script and style tag carries a subresource integrity hash. The build is reproducible, and each release publishes a manifest of file hashes.
+
+The reveal view performs no request that changes state until the person presses reveal. After reading the fragment it removes it from the address bar with `history.replaceState`. Decrypted content is rendered as text nodes or `blob:` URLs, never as HTML.
+
+Before encryption the client removes metadata from images without re-encoding them: JPEG `APP1` to `APP15` and `COM` segments except the ICC profile in `APP2`, and PNG `tEXt`, `zTXt`, `iTXt`, `eXIf` and `tIME` chunks. JPEG orientation is lost with EXIF, so the client reads it first and stores it as `"orientation"` in the file's manifest entry.
+
+## 9. Test vectors
+
+`docs/vectors/` holds JSON known answer tests for `kdf` labels, `seal`, `stream_seal`, `padme`, and the full key schedule with a fixed link secret, password, share id, OPRF key and blind. An implementation in any language must reproduce them. Vectors are frozen once M1 is accepted, and a change to any of them needs a new suite identifier.
