@@ -16,7 +16,7 @@ export function PasswordStrength(props: {
   return (
     <span class="share-password" id="share-password-line">
       <input id="share-password" type="password" aria-label="Share password" placeholder="Share password"
-        autocomplete="new-password" spellcheck={false} ref={props.capture}
+        autocomplete="new-password" spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" ref={props.capture}
         value={props.value} onInput={(event) => props.change(event.currentTarget.value)}
         aria-describedby={props.value ? "share-strength" : undefined} />
       <Show when={props.value}>

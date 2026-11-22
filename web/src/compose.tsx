@@ -210,7 +210,7 @@ export function Compose(props: { client: CryptoClient }) {
               aria-labelledby={`tab-${kind()}`} data-kind={kind()} data-motion-shared="">
               <Show when={kind() === "text"}>
                 <textarea id="share-text" class="note-text" aria-label="Secret text" placeholder="Write the secret here"
-                  spellcheck={false} value={text()} onInput={(event) => {
+                  spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" value={text()} onInput={(event) => {
                     setText(event.currentTarget.value);
                     feedback.notify("");
                   }} />
@@ -225,7 +225,7 @@ export function Compose(props: { client: CryptoClient }) {
                           <input id={`login-${field}`}
                             type={field === "password" && !showLoginPassword() ? "password" : "text"}
                             autocomplete={field === "password" ? "new-password" : "off"}
-                            spellcheck={false} value={login()[field] ?? ""}
+                            spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" value={login()[field] ?? ""}
                             onInput={(event) => updateField(field, event.currentTarget.value)} />
                           <Show when={field === "password"}>
                             <IconButton icon={showLoginPassword() ? "hide" : "eye"}
@@ -235,7 +235,7 @@ export function Compose(props: { client: CryptoClient }) {
                           </Show>
                         </span>
                       }>
-                        <textarea class="login-note" id={`login-${field}`} value={login()[field] ?? ""}
+                        <textarea class="login-note" id={`login-${field}`} spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" value={login()[field] ?? ""}
                           rows={1} onInput={(event) => updateField(field, event.currentTarget.value)} />
                       </Show>
                     </div>
@@ -279,7 +279,7 @@ export function Compose(props: { client: CryptoClient }) {
         <div class="paper folded-paper result-paper" data-motion-shared="" ref={(element) => { folded = element; }}>
           <Seal />
           <div class="sealed-link">
-            <input class="mono" readonly id="created-link" aria-label="Share link" value={share.link} />
+            <input class="mono" readonly spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" id="created-link" aria-label="Share link" value={share.link} />
             <CopyButton label="Copy link" value={share.link} feedback={feedback.notify} />
           </div>
         </div>

@@ -202,7 +202,7 @@ export function Reveal(props: { client: CryptoClient; path: string; takeFragment
             <Show when={share.has_password}>
               <label class="reveal-password" for="reveal-password">
                 <span>Share password</span>
-                <input type="password" autocomplete="off" id="reveal-password" disabled={busy()}
+                <input type="password" autocomplete="off" spellcheck="false" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false" id="reveal-password" disabled={busy()}
                   aria-invalid={invalid() ? "true" : "false"} ref={(element) => { field = element; }}
                   value={password()} onInput={(event) => {
                     setPassword(event.currentTarget.value);
