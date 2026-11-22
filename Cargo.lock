@@ -1123,6 +1123,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tightlip-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror",
+ "tightlip-core",
+ "wasm-bindgen",
+ "zeroize",
+]
+
+[[package]]
 name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

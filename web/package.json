@@ -1,0 +1,29 @@
+{
+  "name": "tightlip-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run wasm && npm run wasm:mock && vite",
+    "wasm": "node scripts/build-wasm.mjs",
+    "wasm:mock": "node scripts/build-wasm-mock.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "npm run wasm && vite build",
+    "test:e2e": "npm run build && npm run wasm:mock && playwright test"
+  },
+  "dependencies": {
+    "@solidjs/web": "2.0.3",
+    "solid-js": "2.0.3"
+  },
+  "devDependencies": {
+    "@babel/core": "7.29.13",
+    "@playwright/test": "1.65.1",
+    "@solidjs/babel-plugin": "2.0.2",
+    "@solidjs/vite-plugin": "3.0.1",
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3",
+    "vite": "8.3.8",
+    "vitest": "5.1.1"
+  }
+}
