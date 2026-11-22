@@ -184,7 +184,7 @@ A share is in one of two states: pending (created, content not yet committed) or
 | `POST /shares/{id}/commit` | `{access_verifier, owner_verifier}` | Same auth. Makes the share live and invalidates the upload token. |
 | `GET /shares/{id}` | none | Returns `{suite, has_password, expires_at, views_left}`. Changes nothing. |
 | `POST /shares/{id}/eval` | `{blinded}` | Spends one attempt. Returns `{evaluated, attempts_left}`. When attempts reach zero the share is destroyed. |
-| `POST /shares/{id}/open` | `{access_tag}` | If the tag matches the verifier and a view remains, spends one view atomically and returns `{manifest, files: [{n, size}], grant}`. A wrong tag returns `401` and spends nothing. |
+| `POST /shares/{id}/open` | `{access_tag}` | If the tag matches the verifier and a view remains, spends one view atomically and returns `{manifest, files: [{n, size}], grant, views_left}`, where `views_left` is the count after this view. A wrong tag returns `401` and spends nothing. |
 | `GET /shares/{id}/files/{n}` | none | Needs `Authorization: Bearer <grant>`. A grant lasts 10 minutes. |
 | `DELETE /shares/{id}` | none | Needs `Authorization: Bearer <b64url(owner_token)>`. Destroys the share. |
 
