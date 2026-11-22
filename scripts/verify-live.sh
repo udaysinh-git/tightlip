@@ -31,7 +31,8 @@ class Index(HTMLParser):
         attrs = dict(attributes)
         if tag == "script" and "src" in attrs:
             self.assets.add(attrs["src"])
-        elif tag == "link" and "href" in attrs:
+        # A canonical link names the page itself, not a file the page loads.
+        elif tag == "link" and "href" in attrs and attrs.get("rel") != "canonical":
             self.assets.add(attrs["href"])
 
 
@@ -52,7 +53,7 @@ files = release.get("files")
 if not isinstance(files, dict) or "index.html" not in files:
     sys.exit("Release manifest must include index.html.")
 for path, digest in files.items():
-    if path != "index.html" and not re.fullmatch(r"assets/[\w.-]+(?:/[\w.-]+)*", path, re.ASCII):
+    if path not in ("index.html", "og.png", "robots.txt", "sitemap.xml") and not re.fullmatch(r"assets/[\w.-]+(?:/[\w.-]+)*", path, re.ASCII):
         sys.exit(f"Unexpected release path: {path!r}")
     if any(part in {".", ".."} for part in path.split("/")):
         sys.exit(f"Invalid release path: {path!r}")
