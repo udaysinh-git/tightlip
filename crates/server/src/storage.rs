@@ -67,6 +67,7 @@ pub(crate) struct FileInfo {
 pub(crate) struct Opened {
     pub manifest: Vec<u8>,
     pub files: Vec<FileInfo>,
+    pub views_left: u32,
 }
 
 #[derive(Clone, Copy)]

@@ -458,6 +458,18 @@ async fn full_client_cycle_with_and_without_password() {
     }
 }
 
+#[tokio::test]
+async fn sequential_opens_report_remaining_views() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let pending = Pending::create(&app, None, 3, 3600).await;
+    pending.upload(&app, &[]).await;
+    pending.commit(&app).await;
+    for views_left in [2, 1, 0] {
+        assert_eq!(pending.reveal(&app).await["views_left"], views_left);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fifty_opens_can_spend_exactly_three_views() {
     let fixture = Fixture::new(Limits::default());
@@ -469,17 +481,19 @@ async fn fifty_opens_can_spend_exactly_three_views() {
     for _ in 0..50 {
         let app = app.clone();
         let request = open_request(&pending.path, &pending.keys.access_tag);
-        opens.spawn(async move { send(&app, request).await.status });
+        opens.spawn(async move { send(&app, request).await });
     }
-    let mut successes = 0;
-    while let Some(status) = opens.join_next().await {
-        match status.unwrap() {
-            StatusCode::OK => successes += 1,
+    let mut views_left = Vec::new();
+    while let Some(response) = opens.join_next().await {
+        let response = response.unwrap();
+        match response.status {
+            StatusCode::OK => views_left.push(response.json()["views_left"].as_u64().unwrap()),
             StatusCode::NOT_FOUND => {}
             status => panic!("unexpected status {status}"),
         }
     }
-    assert_eq!(successes, 3);
+    views_left.sort_unstable();
+    assert_eq!(views_left, [0, 1, 2]);
 }
 
 #[tokio::test]

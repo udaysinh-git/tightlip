@@ -413,6 +413,7 @@ struct OpenResponse {
     files: Vec<FileInfo>,
     #[serde(serialize_with = "serialize_secret")]
     grant: Secret32,
+    views_left: u32,
 }
 
 async fn open(
@@ -432,6 +433,7 @@ async fn open(
                 manifest: b64::encode(&opened.manifest),
                 files: opened.files,
                 grant,
+                views_left: opened.views_left,
             }))
         })
         .await

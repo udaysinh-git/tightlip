@@ -223,7 +223,7 @@ impl Metadata for Sqlite {
             )
             .optional()?;
         // SQLite evaluates the assignment expressions against the old row.
-        let views: Option<u32> = tx
+        let views_left: Option<u32> = tx
             .query_row(
                 &format!(
                     "UPDATE shares SET views_left = views_left - 1,
@@ -242,7 +242,7 @@ impl Metadata for Sqlite {
         if !matches {
             return Err(Error::Unauthorized);
         }
-        let views = views.ok_or(Error::Missing)?;
+        let views_left = views_left.ok_or(Error::Missing)?;
         let manifest = manifest.ok_or(Error::Internal)?;
         let files = {
             let mut statement =
@@ -261,10 +261,14 @@ impl Metadata for Sqlite {
             params![grant, id, now.saturating_add(GRANT_SECONDS)],
         )?;
         tx.commit()?;
-        if views == 0 {
+        if views_left == 0 {
             checkpoint(&conn);
         }
-        Ok(Opened { manifest, files })
+        Ok(Opened {
+            manifest,
+            files,
+            views_left,
+        })
     }
 
     fn file(&self, id: &ShareId, now: i64, n: u32, grant: Option<&Hash>) -> Result<Blob> {
