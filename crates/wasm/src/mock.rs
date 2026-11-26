@@ -50,6 +50,17 @@ pub fn mock_verify_access(tag: &str, verifier: &str) -> bool {
 }
 
 #[wasm_bindgen]
+pub fn mock_verify_eval(tag: &str, verifier: &str) -> bool {
+    let Ok(tag) = decode_secret(tag) else {
+        return false;
+    };
+    let Ok(verifier) = decode_fixed(verifier) else {
+        return false;
+    };
+    share::verify_eval(&tag, &verifier)
+}
+
+#[wasm_bindgen]
 pub fn mock_verify_owner(token: &str, verifier: &str) -> bool {
     let Ok(token) = decode_secret(token) else {
         return false;

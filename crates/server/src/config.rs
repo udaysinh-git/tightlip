@@ -24,6 +24,8 @@ pub struct Config {
     pub web_dir: PathBuf,
     pub public_url: Option<String>,
     pub kek: Secret32,
+    pub kek_id: u32,
+    pub previous_kek: Option<(u32, Secret32)>,
     pub trust_proxy: bool,
     pub limits: Limits,
 }
@@ -69,6 +71,11 @@ impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let get = read_env;
         let kek = load_kek(&get)?;
+        let kek_id = number(&get, "TIGHTLIP_KEK_ID", 1)?;
+        if kek_id == 0 {
+            return Err(ConfigError("TIGHTLIP_KEK_ID"));
+        }
+        let previous_kek = load_previous_kek(&get, kek_id)?;
 
         let mut limits = Limits::default();
         // Range and attempt offsets are pairs, so each table row has one setting.
@@ -127,6 +134,8 @@ impl Config {
             web_dir: get("TIGHTLIP_WEB_DIR")?.map_or_else(|| "./web/dist".into(), PathBuf::from),
             public_url: get("TIGHTLIP_PUBLIC_URL")?,
             kek,
+            kek_id,
+            previous_kek,
             trust_proxy: get("TIGHTLIP_TRUST_PROXY")?.as_deref() == Some("1"),
             limits,
         })
@@ -142,6 +151,23 @@ fn load_kek(
         return read_kek_file(&path).ok_or(ConfigError(FILE));
     }
     value(get, ENV, |value| validate_kek(&Zeroizing::new(value)))?.ok_or(ConfigError(ENV))
+}
+
+fn load_previous_kek(
+    get: &impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
+    current_id: u32,
+) -> Result<Option<(u32, Secret32)>, ConfigError> {
+    const FILE: &str = "TIGHTLIP_KEK_PREVIOUS_FILE";
+    const ID: &str = "TIGHTLIP_KEK_PREVIOUS_ID";
+    let id = value(get, ID, |input| {
+        input.parse::<u32>().ok().filter(|id| *id != current_id)
+    })?;
+    match (id, get(FILE)?) {
+        (None, None) => Ok(None),
+        (Some(id), Some(path)) => Ok(Some((id, read_kek_file(&path).ok_or(ConfigError(FILE))?))),
+        (None, Some(_)) => Err(ConfigError(ID)),
+        (Some(_), None) => Err(ConfigError(FILE)),
+    }
 }
 
 fn validate_kek(text: &str) -> Option<Secret32> {
@@ -236,6 +262,23 @@ mod tests {
         assert!(bool::from(
             load_kek(&get).unwrap().as_bytes().ct_eq(key.as_bytes())
         ));
+        let get_previous = |name| match name {
+            "TIGHTLIP_KEK_PREVIOUS_ID" => Ok(Some("0".to_owned())),
+            "TIGHTLIP_KEK_PREVIOUS_FILE" => get("TIGHTLIP_KEK_FILE"),
+            _ => Ok(None),
+        };
+        let (id, previous) = load_previous_kek(&get_previous, 1).unwrap().unwrap();
+        assert_eq!(id, 0);
+        assert!(bool::from(previous.as_bytes().ct_eq(key.as_bytes())));
+        assert!(load_previous_kek(&get_previous, 0).is_err());
+        assert!(
+            load_previous_kek(
+                &|name| get_previous(name)
+                    .map(|value| { value.filter(|_| name == "TIGHTLIP_KEK_PREVIOUS_ID") }),
+                1
+            )
+            .is_err()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

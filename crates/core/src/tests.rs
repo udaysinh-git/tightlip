@@ -292,7 +292,7 @@ fn share_roles_interoperate_through_wrapped_storage() {
     let (blinded, creator) = share::start(&link, Some("test\u{ff21}")).unwrap();
     let server = oprf::ServerKey::generate().unwrap();
     let evaluated = server.blind_evaluate(&blinded).unwrap();
-    let wrapped = share::wrap_oprf_key(&kek, &id, &server).unwrap();
+    let wrapped = share::wrap_oprf_key(&kek, 1, &id, &server).unwrap();
     let creator_keys = creator.finish(&evaluated, &id).unwrap();
     let access = share::access_verifier(&creator_keys.access_tag);
     let owner_hash = share::owner_verifier(&owner);
@@ -300,7 +300,7 @@ fn share_roles_interoperate_through_wrapped_storage() {
 
     let recipient_keys = {
         let (blinded, recipient) = share::start(&link, Some("testA")).unwrap();
-        let restored = share::unwrap_oprf_key(&kek, &id, &wrapped).unwrap();
+        let restored = share::unwrap_oprf_key(&kek, 1, &id, &wrapped).unwrap();
         let evaluated = restored.blind_evaluate(&blinded).unwrap();
         recipient.finish(&evaluated, &id).unwrap()
     };
@@ -359,20 +359,34 @@ fn unwrap_rejects_wrong_key_wrong_share_and_invalid_scalar() {
     let kek = sample_key();
     let id = [1; 16];
     let server = oprf::ServerKey::generate().unwrap();
-    let wrapped = share::wrap_oprf_key(&kek, &id, &server).unwrap();
+    let wrapped = share::wrap_oprf_key(&kek, 1, &id, &server).unwrap();
+    assert_eq!(&wrapped[..4], &1_u32.to_be_bytes());
+    assert_eq!(share::wrapped_kek_id(&wrapped), Ok(1));
+    assert_eq!(share::wrapped_kek_id(&wrapped[..4]), Err(OpenError));
+    let legacy = share::wrap_oprf_key(&kek, 0, &id, &server).unwrap();
+    assert_eq!(share::wrapped_kek_id(&legacy), Ok(0));
+    assert!(share::unwrap_oprf_key(&kek, 0, &id, &legacy).is_ok());
+    let mut retagged = wrapped.clone();
+    retagged[..4].copy_from_slice(&2_u32.to_be_bytes());
     assert!(matches!(
-        share::unwrap_oprf_key(&kek, &[2; 16], &wrapped),
+        share::unwrap_oprf_key(&kek, 2, &id, &retagged),
+        Err(OpenError)
+    ));
+    retagged[..4].fill(0);
+    assert_eq!(share::wrapped_kek_id(&retagged), Err(OpenError));
+    assert!(matches!(
+        share::unwrap_oprf_key(&kek, 1, &[2; 16], &wrapped),
         Err(OpenError)
     ));
     assert!(matches!(
-        share::unwrap_oprf_key(&Secret32::from_bytes([2; 32]), &id, &wrapped),
+        share::unwrap_oprf_key(&Secret32::from_bytes([2; 32]), 1, &id, &wrapped),
         Err(OpenError)
     ));
     for invalid in [b"".as_slice(), &[0; 32], &[0xff; 32]] {
         let ciphertext =
             aead::seal(&kek, &share::share_aad(labels::OPRF_KEY, &id), invalid).unwrap();
         assert!(matches!(
-            share::unwrap_oprf_key(&kek, &id, &ciphertext),
+            share::unwrap_oprf_key(&kek, 0, &id, &ciphertext),
             Err(OpenError)
         ));
     }

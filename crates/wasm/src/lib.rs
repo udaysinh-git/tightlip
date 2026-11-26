@@ -84,6 +84,16 @@ impl LinkSecret {
             state: Some(state),
         })
     }
+
+    pub fn eval_tag(&self) -> Result<String, JsValue> {
+        let tag = share::eval_tag(&self.0).map_err(|_| Error::Prepare)?;
+        Ok(b64::encode(tag.as_bytes()))
+    }
+
+    pub fn eval_verifier(&self) -> Result<String, JsValue> {
+        let tag = share::eval_tag(&self.0).map_err(|_| Error::Prepare)?;
+        Ok(b64::encode(&share::eval_verifier(&tag)))
+    }
 }
 
 #[wasm_bindgen]

@@ -139,7 +139,7 @@ impl IntoResponse for Error {
             Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
             Self::FileGap | Self::UploadInFlight => (StatusCode::CONFLICT, "conflict"),
             Self::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-            Self::Internal | Self::Io(_) | Self::Sql(_) => {
+            Self::Internal | Self::KeyRotation | Self::Io(_) | Self::Sql(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal")
             }
         };
@@ -177,6 +177,7 @@ impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for ApiPath
 struct Create {
     suite: String,
     blinded: String,
+    eval_verifier: String,
     ttl_seconds: u32,
     max_views: u32,
     has_password: bool,
@@ -205,6 +206,7 @@ async fn create(
         return Err(Error::Invalid);
     }
     let blinded = decode::<32>(&body.blinded).ok_or(Error::Invalid)?;
+    let eval_verifier = decode::<32>(&body.eval_verifier).ok_or(Error::Invalid)?;
     server
         .run(move |state| {
             let now = state.clock.now();
@@ -213,8 +215,8 @@ async fn create(
             let key = ServerKey::generate().map_err(|_| Error::Internal)?;
             let evaluated = key.blind_evaluate(&blinded).map_err(|_| Error::Invalid)?;
             let id = share::generate_share_id().map_err(|_| Error::Internal)?;
-            let wrapped_key =
-                share::wrap_oprf_key(&state.kek, &id, &key).map_err(|_| Error::Internal)?;
+            let wrapped_key = share::wrap_oprf_key(&state.kek, state.kek_id, &id, &key)
+                .map_err(|_| Error::Internal)?;
             let upload_token = Secret32::generate().map_err(|_| Error::Internal)?;
             let extra = if body.has_password {
                 limits.password_attempts_extra
@@ -229,6 +231,7 @@ async fn create(
                 views: body.max_views,
                 attempts: body.max_views.checked_add(extra).ok_or(Error::Invalid)?,
                 upload_hash: token_hash(&upload_token),
+                eval_verifier,
                 wrapped_key,
             };
             state.meta.create(&pending, limits.storage_bytes)?;
@@ -434,10 +437,17 @@ async fn commit(
 async fn info(
     axum::extract::State(server): axum::extract::State<Server>,
     ApiPath(id): ApiPath<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ShareInfo>> {
     let id = decode(&id).ok_or(Error::Invalid)?;
+    let tag = bearer(&headers);
     server
-        .run(move |state| state.meta.info(&id, state.clock.now()).map(Json))
+        .run(move |state| {
+            state
+                .meta
+                .info(&id, state.clock.now(), tag.as_ref())
+                .map(Json)
+        })
         .await
 }
 
@@ -445,6 +455,8 @@ async fn info(
 #[serde(deny_unknown_fields)]
 struct Eval {
     blinded: String,
+    #[serde(default, deserialize_with = "crate::credentials::deserialize_eval_tag")]
+    eval_tag: Option<Secret32>,
 }
 
 #[derive(Serialize)]
@@ -459,24 +471,26 @@ async fn eval(
     request: Request,
 ) -> Result<Json<Evaluated>> {
     let id: ShareId = decode(&id).ok_or(Error::Invalid)?;
-    let blinded = json::<Eval>(request)
-        .await
-        .and_then(|body| decode::<32>(&body.blinded).ok_or(Error::Invalid));
+    let (tag, blinded) = match json::<Eval>(request).await {
+        Ok(body) => (Ok(body.eval_tag), decode::<32>(&body.blinded)),
+        Err(error) => (Err(error), None),
+    };
     server
         .run(move |state| {
             let (evaluated, attempts_left) = state.meta.eval(
                 &id,
                 state.clock.now(),
+                tag,
                 Box::new(|wrapped| {
+                    let input = wrapped.and(blinded.as_ref());
                     let (key_id, wrapped) = wrapped
                         .map_or((&state.dummy.id, state.dummy.wrapped.as_slice()), |key| {
                             (&id, key)
                         });
-                    let key = share::unwrap_oprf_key(&state.kek, key_id, wrapped)
+                    let key = share::unwrap_oprf_key(&state.kek, state.kek_id, key_id, wrapped)
                         .map_err(|_| Error::Internal)?;
-                    let evaluated =
-                        key.blind_evaluate(blinded.as_ref().unwrap_or(&state.dummy.blinded));
-                    let _ = blinded?;
+                    let evaluated = key.blind_evaluate(input.unwrap_or(&state.dummy.blinded));
+                    blinded.ok_or(Error::Invalid)?;
                     evaluated.map_err(|_| Error::Invalid)
                 }),
             )?;

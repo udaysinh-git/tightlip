@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehav
 use subtle::ConstantTimeEq;
 use tightlip_core::{
     Secret32, labels,
-    share::{ShareId, Verifier, verify_access, verify_owner},
+    share::{self, ShareId, Verifier, verify_access, verify_eval, verify_owner},
 };
 
 use super::{
@@ -25,12 +25,18 @@ const FINAL_ATTEMPT_SECONDS: i64 = 120;
 const GRANT_SECONDS: i64 = 600;
 const STORAGE_FULL: Error = Error::RateLimited { retry_after: 600 };
 const DUMMY_HASH: Hash = [0; 32];
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 pub(crate) struct Sqlite(Mutex<Connection>);
 
 impl Sqlite {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(
+        path: &Path,
+        now: i64,
+        current: &Secret32,
+        current_id: u32,
+        previous: Option<&(u32, Secret32)>,
+    ) -> Result<Self> {
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -71,8 +77,17 @@ impl Sqlite {
         }
         if version == 0 {
             tx.execute_batch(include_str!("accounting.sql"))?;
+        }
+        if version < SCHEMA_VERSION {
+            if shares_exist {
+                tx.execute_batch(
+                    "ALTER TABLE shares ADD COLUMN eval_verifier BLOB
+                         CHECK (length(eval_verifier) = 32);",
+                )?;
+            }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        rewrap_keys(&tx, now, current, current_id, previous)?;
         tx.commit()?;
         Ok(Self(Mutex::new(conn)))
     }
@@ -90,6 +105,44 @@ impl Sqlite {
     }
 }
 
+fn rewrap_keys(
+    tx: &Transaction<'_>,
+    now: i64,
+    current: &Secret32,
+    current_id: u32,
+    previous: Option<&(u32, Secret32)>,
+) -> Result<()> {
+    let ids = {
+        let mut statement = tx.prepare(
+            "SELECT id FROM shares WHERE wrapped_key IS NOT NULL AND expires_at > ?1
+               AND (pending_until IS NULL OR pending_until > ?1)",
+        )?;
+        statement
+            .query_map(params![now], |row| row.get::<_, ShareId>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut read = tx.prepare("SELECT wrapped_key FROM shares WHERE id = ?1")?;
+    let mut write = tx.prepare("UPDATE shares SET wrapped_key = ?2 WHERE id = ?1")?;
+    for id in ids {
+        let wrapped: Vec<u8> = read.query_row(params![id], |row| row.get(0))?;
+        let stored_id = share::wrapped_kek_id(&wrapped).map_err(|_| Error::KeyRotation)?;
+        let kek = match previous {
+            _ if stored_id == current_id => current,
+            Some((previous_id, key)) if stored_id == *previous_id => key,
+            None if stored_id == 0 => current,
+            _ => return Err(Error::KeyRotation),
+        };
+        let key = share::unwrap_oprf_key(kek, stored_id, &id, &wrapped)
+            .map_err(|_| Error::KeyRotation)?;
+        if stored_id != current_id {
+            let wrapped = share::wrap_oprf_key(current, current_id, &id, &key)
+                .map_err(|_| Error::KeyRotation)?;
+            write.execute(params![id, wrapped])?;
+        }
+    }
+    Ok(())
+}
+
 impl Metadata for Sqlite {
     fn check_storage(&self, storage_cap: u64) -> Result<()> {
         let conn = self.connection()?;
@@ -102,8 +155,8 @@ impl Metadata for Sqlite {
         check_storage(&tx, storage_cap)?;
         let created = tx.execute(
             "INSERT INTO shares(id, expires_at, pending_until, has_password, views_left,
-                                attempts_left, upload_hash, wrapped_key)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+                                attempts_left, upload_hash, wrapped_key, eval_verifier)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
              WHERE NOT EXISTS (SELECT 1 FROM grants WHERE share_id = ?1)
                AND NOT EXISTS (SELECT 1 FROM files WHERE share_id = ?1)",
             params![
@@ -114,7 +167,8 @@ impl Metadata for Sqlite {
                 pending.views,
                 pending.attempts,
                 pending.upload_hash,
-                pending.wrapped_key
+                pending.wrapped_key,
+                pending.eval_verifier
             ],
         )?;
         if created == 0 {
@@ -202,36 +256,61 @@ impl Metadata for Sqlite {
         Ok(())
     }
 
-    fn info(&self, id: &ShareId, now: i64) -> Result<ShareInfo> {
+    fn info(&self, id: &ShareId, now: i64, tag: Option<&Secret32>) -> Result<ShareInfo> {
         let info = self
             .connection()?
             .query_row(
-                &format!("SELECT has_password, expires_at, views_left FROM shares WHERE {LIVE}"),
+                &format!(
+                    "SELECT has_password, expires_at, views_left, eval_verifier
+                          FROM shares WHERE {LIVE}"
+                ),
                 params![id, now],
                 |row| {
-                    Ok(ShareInfo {
-                        suite: labels::SUITE,
-                        has_password: row.get(0)?,
-                        expires_at: row.get(1)?,
-                        views_left: row.get(2)?,
-                    })
+                    Ok((
+                        ShareInfo {
+                            suite: labels::SUITE,
+                            has_password: row.get(0)?,
+                            expires_at: row.get(1)?,
+                            views_left: row.get(2)?,
+                        },
+                        row.get::<_, Option<Verifier>>(3)?,
+                    ))
                 },
             )
             .optional()?;
-        info.ok_or(Error::Missing)
+        let authorized = eval_authorized(
+            info.as_ref().and_then(|(_, verifier)| verifier.as_ref()),
+            tag,
+        );
+        let (info, _) = info.ok_or(Error::Missing)?;
+        if !authorized {
+            return Err(Error::Unauthorized);
+        }
+        Ok(info)
     }
 
-    fn eval(&self, id: &ShareId, now: i64, evaluate: Box<Evaluate<'_>>) -> Result<([u8; 32], u32)> {
+    fn eval(
+        &self,
+        id: &ShareId,
+        now: i64,
+        tag: Result<Option<Secret32>>,
+        evaluate: Box<Evaluate<'_>>,
+    ) -> Result<([u8; 32], u32)> {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let wrapped: Option<Vec<u8>> = tx
+        let row: Option<(Vec<u8>, Option<Verifier>)> = tx
             .query_row(
-                &format!("SELECT wrapped_key FROM shares WHERE {LIVE}"),
+                &format!("SELECT wrapped_key, eval_verifier FROM shares WHERE {LIVE}"),
                 params![id, now],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let evaluated = evaluate(wrapped.as_deref());
+        let authorized = eval_authorized(
+            row.as_ref().and_then(|(_, verifier)| verifier.as_ref()),
+            tag.as_ref().ok().and_then(Option::as_ref),
+        );
+        let wrapped = row.as_ref().filter(|_| authorized && tag.is_ok());
+        let evaluated = evaluate(wrapped.map(|(key, _)| key.as_slice()));
         let attempts: Option<u32> = tx
             .query_row(
                 &format!(
@@ -242,8 +321,12 @@ impl Metadata for Sqlite {
                 |row| row.get(0),
             )
             .optional()?;
-        if wrapped.is_none() {
+        if row.is_none() {
             return Err(Error::Missing);
+        }
+        tag?;
+        if !authorized {
+            return Err(Error::Unauthorized);
         }
         let evaluated = evaluated?;
         let attempts = attempts.ok_or(Error::Missing)?;
@@ -476,6 +559,12 @@ impl Metadata for Sqlite {
     }
 }
 
+fn eval_authorized(expected: Option<&Verifier>, tag: Option<&Secret32>) -> bool {
+    let dummy = Secret32::from_bytes([0; 32]);
+    let matches = verify_eval(tag.unwrap_or(&dummy), expected.unwrap_or(&DUMMY_HASH));
+    expected.is_none() || (matches && tag.is_some())
+}
+
 struct PendingAuth {
     manifest_size: u64,
 }
@@ -584,6 +673,10 @@ mod tests {
         let path = dir.path().join("legacy.sqlite3");
         let conn = Connection::open(&path).unwrap();
         let legacy = include_str!("schema.sql")
+            .replace(
+                ",\n    eval_verifier BLOB CHECK (length(eval_verifier) = 32)",
+                "",
+            )
             .replace(",\n    final_attempt_until INTEGER", "")
             .replace(
                 "share_id BLOB NOT NULL,",
@@ -619,7 +712,8 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let store = Sqlite::open(&path).unwrap();
+        let kek = Secret32::generate().unwrap();
+        let store = Sqlite::open(&path, 99, &kek, 1, None).unwrap();
         assert_eq!(storage_used(&store.connection().unwrap()).unwrap(), 7);
         assert_eq!(store.live_blobs().unwrap(), HashSet::from([blob]));
         assert_eq!(store.file(&id, 99, 0, Some(&grant)).unwrap().key, blob);

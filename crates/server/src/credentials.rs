@@ -33,3 +33,10 @@ pub(crate) fn deserialize_secret<'de, D: Deserializer<'de>>(
     let text = Zeroizing::new(String::deserialize(deserializer)?);
     decode_secret(&text).ok_or_else(|| de::Error::custom("invalid credential"))
 }
+
+pub(crate) fn deserialize_eval_tag<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Secret32>, D::Error> {
+    let text = Zeroizing::new(Option::<String>::deserialize(deserializer)?);
+    Ok(text.as_deref().and_then(decode_secret))
+}

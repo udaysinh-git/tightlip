@@ -23,7 +23,7 @@ async function mock() {
 function serveBuiltRoutes(server: PreviewServer) {
   server.middlewares.use((request, response, next) => {
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
-    if (path === "/" || shareId(path) !== undefined) {
+    if (path === "/" || path === "/security" || shareId(path) !== undefined) {
       response.setHeader("Cache-Control", "no-cache");
       request.url = "/index.html";
       next();
@@ -32,6 +32,11 @@ function serveBuiltRoutes(server: PreviewServer) {
     if (path === "/.well-known/tightlip-release.json") {
       response.setHeader("Cache-Control", "no-cache");
       request.url = "/release.json";
+      next();
+      return;
+    }
+    if (path === "/robots.txt" || path === "/sitemap.xml" || path === "/og.png") {
+      response.setHeader("Cache-Control", path === "/og.png" ? "public, max-age=86400" : "public, max-age=3600");
       next();
       return;
     }

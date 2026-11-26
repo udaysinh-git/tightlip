@@ -97,7 +97,9 @@ async function create(input: CreateInput, progress: (value: Progress) => void): 
       const exchange = linkSecret.start(input.password);
       let created: Awaited<ReturnType<typeof createShare>>;
       try {
-        created = await createShare(exchange.blinded(), input.ttl, input.views, input.password !== undefined);
+        created = await createShare(
+          exchange.blinded(), linkSecret.eval_verifier(), input.ttl, input.views, input.password !== undefined,
+        );
       } catch (error) {
         exchange.free();
         throw error;
@@ -271,9 +273,10 @@ async function reveal(password: string | undefined): Promise<Revealed> {
   const exchange = secret.start(hasPassword ? password : undefined);
   let evaluation: Awaited<ReturnType<typeof evaluate>>;
   try {
-    evaluation = await evaluate(id, exchange.blinded());
+    evaluation = await evaluate(id, exchange.blinded(), secret.eval_tag());
   } catch (error) {
     exchange.free();
+    if (error instanceof ApiError && error.code === "unauthorized") throw new Error(unavailable);
     throw error;
   }
   const session = exchange.finish(evaluation.evaluated, id);
@@ -372,12 +375,15 @@ scope.onmessage = async ({ data }: MessageEvent<Request>) => {
           throw new Error(unavailable);
         }
         try {
-          const metadata = await getMetadata(parsed);
+          const metadata = await getMetadata(parsed, secret.eval_tag());
           recipient?.secret.free();
           recipient = { id: parsed, secret, hasPassword: metadata.has_password, expiresAt: metadata.expires_at };
           result = metadata;
         } catch (error) {
           secret.free();
+          if (error instanceof ApiError && error.code === "unauthorized") {
+            throw new Error("The key does not match this share. Check the key or ask for a new link.");
+          }
           throw error;
         }
         break;

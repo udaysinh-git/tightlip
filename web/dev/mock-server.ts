@@ -13,6 +13,7 @@ interface MockWasm {
   MockOprfKey: { generate(): OprfKey };
   mock_random_id(): string;
   mock_random_token(): string;
+  mock_verify_eval(tag: string, verifier: string): boolean;
   mock_verify_access(tag: string, verifier: string): boolean;
   mock_verify_owner(token: string, verifier: string): boolean;
   mock_compare_tokens(first: string, second: string): boolean;
@@ -27,6 +28,7 @@ interface Stored {
   hasPassword: boolean;
   views: number;
   attempts: number;
+  evalVerifier: string;
   accessVerifier?: string;
   ownerVerifier?: string;
   manifest?: Buffer;
@@ -74,14 +76,17 @@ async function readBody(request: IncomingMessage, mime: string, limit: number): 
   return Buffer.concat(chunks, size);
 }
 
-async function fields(request: IncomingMessage, ...keys: string[]) {
+async function jsonBody(request: IncomingMessage): Promise<unknown> {
   const raw = await readBody(request, "application/json", limits.json);
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
   } catch {
     fail("bad_request");
   }
+}
+
+async function fields(request: IncomingMessage, ...keys: string[]) {
+  const parsed = await jsonBody(request);
   if (!exactFields(parsed, ...keys)) fail("bad_request");
   return parsed;
 }
@@ -166,9 +171,9 @@ export async function createMockServer(moduleUrl: URL) {
   }
 
   async function create(request: IncomingMessage, response: ServerResponse) {
-    const { suite, blinded, ttl_seconds, max_views, has_password } =
-      await fields(request, "suite", "blinded", "ttl_seconds", "max_views", "has_password");
-    if (suite !== SUITE || !base64url(blinded, 32) || typeof has_password !== "boolean"
+    const { suite, blinded, eval_verifier, ttl_seconds, max_views, has_password } =
+      await fields(request, "suite", "blinded", "eval_verifier", "ttl_seconds", "max_views", "has_password");
+    if (suite !== SUITE || !base64url(blinded, 32) || !base64url(eval_verifier, 32) || typeof has_password !== "boolean"
       || !integer(ttl_seconds, limits.ttlMin, limits.ttlMax) || !integer(max_views, 1, limits.viewsMax)) {
       fail("bad_request");
     }
@@ -188,7 +193,7 @@ export async function createMockServer(moduleUrl: URL) {
     const expires_at = now + ttl_seconds;
     shares.set(id, {
       id, key, expiresAt: expires_at, pendingUntil: now + limits.pendingSeconds,
-      uploadToken: upload_token, hasPassword: has_password, views: max_views,
+      uploadToken: upload_token, hasPassword: has_password, views: max_views, evalVerifier: eval_verifier,
       attempts: max_views + (has_password ? 5 : 3), files: [], fileBytes: 0, grants: [], opens: new Map(),
     });
     json(response, 201, { id, evaluated, upload_token, expires_at });
@@ -217,8 +222,12 @@ export async function createMockServer(moduleUrl: URL) {
 
   async function evaluate(request: IncomingMessage, response: ServerResponse, id: string) {
     live(id);
-    const { blinded } = await fields(request, "blinded");
+    const body = await jsonBody(request);
     const share = live(id);
+    if (!exactFields(body, "blinded", "eval_tag") && !exactFields(body, "blinded")) fail("bad_request");
+    const { blinded, eval_tag } = body;
+    if (typeof blinded !== "string" || (eval_tag != null && typeof eval_tag !== "string")) fail("bad_request");
+    if (!base64url(eval_tag, 32) || !wasm.mock_verify_eval(eval_tag, share.evalVerifier)) fail("unauthorized");
     if (!base64url(blinded, 32) || !share.key) fail("bad_request");
     const evaluated = blindEvaluate(share.key, blinded);
     const attempts_left = --share.attempts;
@@ -265,6 +274,7 @@ export async function createMockServer(moduleUrl: URL) {
 
     if (method === "GET" && operation === undefined) {
       const share = live(id);
+      if (!wasm.mock_verify_eval(bearer(request), share.evalVerifier)) fail("unauthorized");
       return json(response, 200, {
         suite: SUITE, has_password: share.hasPassword, expires_at: share.expiresAt, views_left: share.views,
       });

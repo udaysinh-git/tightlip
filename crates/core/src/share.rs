@@ -162,8 +162,8 @@ fn derive_secret(salt: &[u8], ikm: &[u8], info: &[&[u8]]) -> Result<Secret32, De
     Ok(Secret32::from_bytes(*bytes))
 }
 
-pub fn eval_tag(link_secret: &Secret32, id: &ShareId) -> Result<Secret32, DeriveError> {
-    derive_secret(b"", link_secret.as_bytes(), &[labels::EVAL_AUTH, id])
+pub fn eval_tag(link_secret: &Secret32) -> Result<Secret32, DeriveError> {
+    derive_secret(b"", link_secret.as_bytes(), &[labels::EVAL_AUTH])
 }
 
 pub fn eval_verifier(tag: &Secret32) -> Verifier {
@@ -200,19 +200,52 @@ fn verifier(label: &[u8], secret: &Secret32) -> Verifier {
 
 pub fn wrap_oprf_key(
     kek: &Secret32,
+    kek_id: u32,
     share_id: &ShareId,
     key: &ServerKey,
 ) -> Result<Vec<u8>, SealError> {
-    let aad = share_aad(labels::OPRF_KEY, share_id);
-    aead::seal(kek, &aad, key.secret().as_bytes())
+    let mut aad = share_aad(labels::OPRF_KEY, share_id);
+    let mut wrapped = Vec::new();
+    if kek_id != 0 {
+        let prefix = kek_id.to_be_bytes();
+        aad.extend_from_slice(&prefix);
+        wrapped.extend_from_slice(&prefix);
+    }
+    wrapped.extend(aead::seal(kek, &aad, key.secret().as_bytes())?);
+    Ok(wrapped)
+}
+
+const LEGACY_WRAP_LEN: usize = aead::NONCE_LEN + aead::COMMITMENT_LEN + 32 + aead::TAG_LEN;
+
+pub fn wrapped_kek_id(wrapped: &[u8]) -> Result<u32, OpenError> {
+    match wrapped.len() {
+        LEGACY_WRAP_LEN => Ok(0),
+        len if len == LEGACY_WRAP_LEN + size_of::<u32>() => {
+            let (prefix, _) = wrapped.split_first_chunk().ok_or(OpenError)?;
+            let id = u32::from_be_bytes(*prefix);
+            if id == 0 { Err(OpenError) } else { Ok(id) }
+        }
+        _ => Err(OpenError),
+    }
 }
 
 pub fn unwrap_oprf_key(
     kek: &Secret32,
+    kek_id: u32,
     share_id: &ShareId,
     wrapped: &[u8],
 ) -> Result<ServerKey, OpenError> {
-    let aad = share_aad(labels::OPRF_KEY, share_id);
+    if wrapped_kek_id(wrapped)? != kek_id {
+        return Err(OpenError);
+    }
+    let mut aad = share_aad(labels::OPRF_KEY, share_id);
+    let wrapped = if kek_id == 0 {
+        wrapped
+    } else {
+        let (prefix, ciphertext) = wrapped.split_first_chunk::<4>().ok_or(OpenError)?;
+        aad.extend_from_slice(prefix);
+        ciphertext
+    };
     let key = aead::open(kek, &aad, wrapped)?;
     let bytes = key.as_bytes().try_into().map_err(|_| OpenError)?;
     ServerKey::from_secret(Secret32::from_bytes(bytes)).map_err(|_| OpenError)

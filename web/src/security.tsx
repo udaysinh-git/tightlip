@@ -24,6 +24,7 @@ export function Security(props: { back: (event: MouseEvent) => void }) {
         <li>Send the key separately to let the recipient paste it without putting it in the address bar.</li>
         <li>Opening the link also needs one answer from the server, and the server gives a limited number of them.
           A share password is checked through that same answer, so every guess uses one up.</li>
+        <li>For new shares, the browser sends a credential derived from the link key before the server returns share details or counts an attempt.</li>
       </ol>
 
       <div class="ledger">
@@ -33,7 +34,7 @@ export function Security(props: { back: (event: MouseEvent) => void }) {
             <li>Share ID, expiry, pending deadline and password flag</li>
             <li>View and attempt counts, final attempt deadline and wrapped server key</li>
             <li>Encrypted content, file indices, blob identifiers and padded file sizes</li>
-            <li>Hashes used to authorize uploads, opens, downloads and deletion</li>
+            <li>Hashes used to authorize uploads, share details, attempts, opens, downloads and deletion</li>
             <li>Grant deadlines and hashes of successful open requests with their deadlines and view counts</li>
             <li>Storage totals and records of files awaiting deletion</li>
           </ul>

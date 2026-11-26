@@ -7,6 +7,8 @@ interface Handle {
 }
 
 export class LinkSecret implements Handle {
+  eval_tag(): string;
+  eval_verifier(): string;
   static generate(): LinkSecret;
   static parse(path: string, fragment: string): LinkSecret;
   format(authority: string, id: string): string;

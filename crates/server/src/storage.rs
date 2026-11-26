@@ -23,6 +23,8 @@ pub(crate) enum Error {
     Io(#[from] std::io::Error),
     #[error("internal failure")]
     Internal,
+    #[error("could not rewrap stored OPRF keys")]
+    KeyRotation,
     #[error("share unavailable")]
     Missing,
     #[error("invalid credential")]
@@ -49,6 +51,7 @@ pub(crate) struct Pending {
     pub views: u32,
     pub attempts: u32,
     pub upload_hash: Hash,
+    pub eval_verifier: Verifier,
     pub wrapped_key: Vec<u8>,
 }
 
@@ -114,8 +117,14 @@ pub(crate) trait Metadata: Send + Sync {
         upload_hash: Option<&Hash>,
         verifiers: Result<(Verifier, Verifier)>,
     ) -> Result<()>;
-    fn info(&self, id: &ShareId, now: i64) -> Result<ShareInfo>;
-    fn eval(&self, id: &ShareId, now: i64, evaluate: Box<Evaluate<'_>>) -> Result<([u8; 32], u32)>;
+    fn info(&self, id: &ShareId, now: i64, tag: Option<&Secret32>) -> Result<ShareInfo>;
+    fn eval(
+        &self,
+        id: &ShareId,
+        now: i64,
+        tag: Result<Option<Secret32>>,
+        evaluate: Box<Evaluate<'_>>,
+    ) -> Result<([u8; 32], u32)>;
     fn open(
         &self,
         id: &ShareId,

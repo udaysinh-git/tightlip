@@ -29,7 +29,7 @@ use tightlip_core::{
     stream::CHUNK_LEN,
 };
 use tightlip_server::{
-    Clock, Server,
+    Clock, Server, ServerError,
     config::{Config, Limits},
 };
 use tokio::task::JoinSet;
@@ -117,19 +117,21 @@ fn server(
     limits: Limits,
     trust_proxy: bool,
 ) -> Server {
-    Server::open(
-        Config {
-            port: 0,
-            data_dir: dir.to_owned(),
-            web_dir: dir.join("web"),
-            public_url: None,
-            kek: Secret32::from_bytes(*kek.as_bytes()),
-            trust_proxy,
-            limits,
-        },
-        clock.clone(),
-    )
-    .unwrap()
+    Server::open(config(dir, kek, limits, trust_proxy), clock.clone()).unwrap()
+}
+
+fn config(dir: &Path, kek: &Secret32, limits: Limits, trust_proxy: bool) -> Config {
+    Config {
+        port: 0,
+        data_dir: dir.to_owned(),
+        web_dir: dir.join("web"),
+        public_url: None,
+        kek: Secret32::from_bytes(*kek.as_bytes()),
+        kek_id: 1,
+        previous_kek: None,
+        trust_proxy,
+        limits,
+    }
 }
 
 struct Pending {
@@ -149,7 +151,7 @@ impl Pending {
         let (blinded, client) = share::start(&link, password).unwrap();
         let response = send(
             app,
-            create_request(blinded, views, ttl_seconds, password.is_some()),
+            create_request(&link, blinded, views, ttl_seconds, password.is_some()),
         )
         .await;
         assert_eq!(response.status, StatusCode::CREATED);
@@ -243,10 +245,24 @@ impl Pending {
         )
     }
 
+    fn eval_tag(&self) -> Zeroizing<String> {
+        Zeroizing::new(b64::encode(share::eval_tag(&self.link).unwrap().as_bytes()))
+    }
+
+    fn eval_request(&self, blinded: &[u8; 32]) -> Request<Body> {
+        eval_request(&self.path, blinded, Some(&self.eval_tag()))
+    }
+
     async fn info(&self, app: &Router) -> Received {
         send(
             app,
-            request(Method::GET, &self.path, None, None, Body::empty()),
+            request(
+                Method::GET,
+                &self.path,
+                Some(&self.eval_tag()),
+                None,
+                Body::empty(),
+            ),
         )
         .await
     }
@@ -324,6 +340,7 @@ fn stream_chunks(chunks: Vec<Bytes>) -> Body {
 }
 
 fn create_request(
+    link: &Secret32,
     blinded: [u8; 32],
     views: u32,
     ttl_seconds: u32,
@@ -335,18 +352,202 @@ fn create_request(
         None,
         json!({
             "suite": labels::SUITE, "blinded": b64::encode(&blinded),
+            "eval_verifier": b64::encode(&share::eval_verifier(&share::eval_tag(link).unwrap())),
             "ttl_seconds": ttl_seconds, "max_views": views, "has_password": has_password,
         }),
     )
 }
 
-fn eval_request(path: &str, blinded: &[u8; 32]) -> Request<Body> {
-    json_request(
-        Method::POST,
-        &format!("{path}/eval"),
-        None,
-        json!({"blinded": b64::encode(blinded)}),
+fn eval_request(path: &str, blinded: &[u8; 32], tag: Option<&str>) -> Request<Body> {
+    let mut body = json!({"blinded": b64::encode(blinded)});
+    if let Some(tag) = tag {
+        body["eval_tag"] = json!(tag);
+    }
+    json_request(Method::POST, &format!("{path}/eval"), None, body)
+}
+
+#[tokio::test]
+async fn eval_and_metadata_require_the_link_credential_without_spending_on_denial() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let share = Pending::create(&app, None, 2, 3600).await;
+    share.upload(&app, &[]).await;
+    share.commit(&app).await;
+    let other = Pending::create(&app, None, 2, 3600).await;
+    let (blinded, client) = share::start(&share.link, None).unwrap();
+
+    for tag in [None, Some(other.eval_tag().as_str()), Some("invalid")] {
+        send(
+            &app,
+            request(Method::GET, &share.path, tag, None, Body::empty()),
+        )
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthorized");
+        send(&app, eval_request(&share.path, &blinded, tag))
+            .await
+            .assert_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    assert_eq!(share.info(&app).await.json()["views_left"], 2);
+    let result = send(&app, share.eval_request(&blinded)).await;
+    assert_eq!(result.status, StatusCode::OK);
+    let body = result.json();
+    assert_eq!(body["attempts_left"], 4);
+    let keys = client
+        .finish(&bytes(&body["evaluated"]), &share.id)
+        .unwrap();
+    assert!(share::verify_access(
+        &keys.access_tag,
+        &share::access_verifier(&share.keys.access_tag)
+    ));
+}
+
+#[tokio::test]
+async fn startup_migrates_unprefixed_keys_and_preserves_legacy_access_until_expiry() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let share = Pending::create(&app, None, 2, 300).await;
+    share.upload(&app, &[]).await;
+    share.commit(&app).await;
+    drop(app);
+    drop(fixture.server);
+
+    let db = Connection::open(fixture.dir.path().join("tightlip.sqlite3")).unwrap();
+    let wrapped: Vec<u8> = db
+        .query_row("SELECT wrapped_key FROM shares", [], |row| row.get(0))
+        .unwrap();
+    let key = share::unwrap_oprf_key(&fixture.kek, 1, &share.id, &wrapped).unwrap();
+    let legacy = share::wrap_oprf_key(&fixture.kek, 0, &share.id, &key).unwrap();
+    db.execute("UPDATE shares SET wrapped_key = ?1", params![legacy])
+        .unwrap();
+    db.execute_batch("ALTER TABLE shares DROP COLUMN eval_verifier; PRAGMA user_version = 1;")
+        .unwrap();
+
+    let wrong_key = Secret32::generate().unwrap();
+    assert!(matches!(
+        Server::open(
+            config(fixture.dir.path(), &wrong_key, Limits::default(), false),
+            fixture.clock.clone(),
+        ),
+        Err(ServerError::KeyRotation)
+    ));
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let restarted = server(
+        fixture.dir.path(),
+        &fixture.kek,
+        &fixture.clock,
+        Limits::default(),
+        false,
+    );
+    let app = restarted.router();
+    let wrapped: Vec<u8> = db
+        .query_row("SELECT wrapped_key FROM shares", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(share::wrapped_kek_id(&wrapped), Ok(1));
+    let info = || request(Method::GET, &share.path, None, None, Body::empty());
+    assert_eq!(send(&app, info()).await.status, StatusCode::OK);
+    let (blinded, client) = share::start(&share.link, None).unwrap();
+    let eval = || eval_request(&share.path, &blinded, None);
+    let response = send(&app, eval()).await;
+    assert_eq!(response.status, StatusCode::OK);
+    let keys = client
+        .finish(&bytes(&response.json()["evaluated"]), &share.id)
+        .unwrap();
+    assert_eq!(
+        send(&app, open_request(&share.path, &keys.access_tag))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    fixture.clock.0.fetch_add(300, Ordering::Relaxed);
+    for request in [info(), eval()] {
+        send(&app, request)
+            .await
+            .assert_error(StatusCode::NOT_FOUND, "not_found");
+    }
+}
+
+#[tokio::test]
+async fn startup_rotates_live_and_pending_keys_atomically_and_refuses_unknown_ids() {
+    let fixture = Fixture::new(Limits::default());
+    let app = fixture.server.router();
+    let live = Pending::create(&app, None, 2, 3600).await;
+    live.upload(&app, &[]).await;
+    live.commit(&app).await;
+    let pending = Pending::create(&app, None, 1, 3600).await;
+    let db = fixture.db();
+    drop(app);
+    drop(fixture.server);
+
+    let wrapped = |id: &ShareId| -> Vec<u8> {
+        db.query_row(
+            "SELECT wrapped_key FROM shares WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let old_live = wrapped(&live.id);
+    let old_pending = wrapped(&pending.id);
+    let unknown = share::wrap_oprf_key(
+        &fixture.kek,
+        9,
+        &pending.id,
+        &share::unwrap_oprf_key(&fixture.kek, 1, &pending.id, &old_pending).unwrap(),
     )
+    .unwrap();
+    let set_pending = |value: &[u8]| {
+        db.execute(
+            "UPDATE shares SET wrapped_key = ?2 WHERE id = ?1",
+            params![pending.id, value],
+        )
+        .unwrap();
+    };
+    set_pending(&unknown);
+    let next_key = Secret32::generate().unwrap();
+    let next_config = || {
+        let mut config = config(fixture.dir.path(), &next_key, Limits::default(), false);
+        config.kek_id = 2;
+        config.previous_kek = Some((1, Secret32::from_bytes(*fixture.kek.as_bytes())));
+        config
+    };
+    assert!(matches!(
+        Server::open(next_config(), fixture.clock.clone()),
+        Err(ServerError::KeyRotation)
+    ));
+    assert_eq!(wrapped(&live.id), old_live);
+    assert_eq!(wrapped(&pending.id), unknown);
+    set_pending(&old_pending);
+
+    let rotated = Server::open(next_config(), fixture.clock.clone()).unwrap();
+    for id in [&live.id, &pending.id] {
+        assert_eq!(share::wrapped_kek_id(&wrapped(id)), Ok(2));
+    }
+    drop(rotated);
+    let mut current_only = next_config();
+    current_only.previous_kek = None;
+    let restarted = Server::open(current_only, fixture.clock.clone()).unwrap();
+    let app = restarted.router();
+    pending.upload(&app, &[]).await;
+    pending.commit(&app).await;
+    for share in [live, pending] {
+        let (blinded, client) = share::start(&share.link, None).unwrap();
+        let evaluated = send(&app, share.eval_request(&blinded)).await;
+        assert_eq!(evaluated.status, StatusCode::OK);
+        let keys = client
+            .finish(&bytes(&evaluated.json()["evaluated"]), &share.id)
+            .unwrap();
+        assert_eq!(
+            send(&app, open_request(&share.path, &keys.access_tag))
+                .await
+                .status,
+            StatusCode::OK
+        );
+    }
 }
 
 fn open_request(path: &str, tag: &Secret32) -> Request<Body> {
@@ -395,7 +596,7 @@ async fn full_client_cycle_with_and_without_password() {
         );
         assert_eq!(pending.expires_at, START + 3600);
         let (blinded, client) = share::start(&pending.link, password).unwrap();
-        let response = send(&app, eval_request(&pending.path, &blinded)).await;
+        let response = send(&app, pending.eval_request(&blinded)).await;
         assert_eq!(response.status, StatusCode::OK);
         let eval = response.json();
         assert_eq!(
@@ -512,9 +713,9 @@ async fn final_password_evaluation_can_open_before_the_grace_deadline() {
     pending.upload(&app, &[b"blob to destroy"]).await;
     pending.commit(&app).await;
     let (blinded, wrong) = share::start(&pending.link, Some("wrong test password")).unwrap();
-    let invalid = send(&app, eval_request(&pending.path, &[0; 32])).await;
+    let invalid = send(&app, pending.eval_request(&[0; 32])).await;
     assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
-    let response = send(&app, eval_request(&pending.path, &blinded)).await;
+    let response = send(&app, pending.eval_request(&blinded)).await;
     assert_eq!(response.status, StatusCode::OK);
     let first = response.json();
     assert_eq!(first["attempts_left"], 5);
@@ -525,7 +726,7 @@ async fn final_password_evaluation_can_open_before_the_grace_deadline() {
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
     assert_eq!(pending.info(&app).await.json()["views_left"], 1);
     for attempts_left in (1..5).rev() {
-        let response = send(&app, eval_request(&pending.path, &blinded)).await;
+        let response = send(&app, pending.eval_request(&blinded)).await;
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.json()["attempts_left"], attempts_left);
         send(&app, open_request(&pending.path, &wrong.access_tag))
@@ -534,7 +735,7 @@ async fn final_password_evaluation_can_open_before_the_grace_deadline() {
     }
     let (correct_blind, correct) =
         share::start(&pending.link, Some("creation test password")).unwrap();
-    let last = send(&app, eval_request(&pending.path, &correct_blind)).await;
+    let last = send(&app, pending.eval_request(&correct_blind)).await;
     assert_eq!(last.status, StatusCode::OK);
     assert_eq!(last.json()["attempts_left"], 0);
     let key_removed: bool = fixture
@@ -557,9 +758,7 @@ async fn final_password_evaluation_can_open_before_the_grace_deadline() {
     );
     assert_eq!(pending.info(&app).await.status, StatusCode::NOT_FOUND);
     assert_eq!(
-        send(&app, eval_request(&pending.path, &blinded))
-            .await
-            .status,
+        send(&app, pending.eval_request(&blinded)).await.status,
         StatusCode::NOT_FOUND
     );
     fixture.advance(120);
@@ -581,7 +780,7 @@ async fn an_unused_final_attempt_expires_at_the_grace_deadline() {
     pending.commit(&app).await;
     let (blinded, _) = share::start(&pending.link, None).unwrap();
     for attempts_left in (0..4).rev() {
-        let evaluation = send(&app, eval_request(&pending.path, &blinded)).await;
+        let evaluation = send(&app, pending.eval_request(&blinded)).await;
         assert_eq!(evaluation.json()["attempts_left"], attempts_left);
     }
     let wrong = Secret32::generate().unwrap();
@@ -688,7 +887,7 @@ async fn issued_grants_survive_deletion_or_attempt_exhaustion() {
         } else {
             let (blinded, _) = share::start(&pending.link, None).unwrap();
             for attempts_left in (0..5).rev() {
-                let evaluation = send(&app, eval_request(&pending.path, &blinded)).await;
+                let evaluation = send(&app, pending.eval_request(&blinded)).await;
                 assert_eq!(evaluation.json()["attempts_left"], attempts_left);
             }
             fixture.advance(120);
@@ -737,7 +936,7 @@ async fn unavailable_shares_have_identical_recipient_responses() {
     for route in 0..5 {
         let make = |path: &str| match route {
             0 => request(Method::GET, path, None, None, Body::empty()),
-            1 => eval_request(path, &blinded),
+            1 => eval_request(path, &blinded, Some(&expired.eval_tag())),
             2 => open_request(path, &expired.keys.access_tag),
             3 => download_request(path, 0, grant),
             _ => request(
@@ -968,8 +1167,9 @@ async fn global_storage_cap_atomically_counts_manifests_and_files() {
     capped(rejected);
     assert_eq!(fixture.blob_count(), 1);
     capped(send(&app, b.put("manifest", Body::from("no room"))).await);
-    let (blinded, _) = share::start(&a.link, None).unwrap();
-    capped(send(&app, create_request(blinded, 1, 3600, false)).await);
+    let link = Secret32::generate().unwrap();
+    let (blinded, _) = share::start(&link, None).unwrap();
+    capped(send(&app, create_request(&link, blinded, 1, 3600, false)).await);
     assert_eq!(
         send(&app, a.put("manifest", Body::from(vec![0; 19])))
             .await
@@ -977,7 +1177,7 @@ async fn global_storage_cap_atomically_counts_manifests_and_files() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(
-        send(&app, create_request(blinded, 1, 3600, false))
+        send(&app, create_request(&link, blinded, 1, 3600, false))
             .await
             .status,
         StatusCode::CREATED
@@ -1098,9 +1298,10 @@ async fn only_trusted_last_forwarded_hop_affects_the_in_memory_rate_limit() {
             trust_proxy,
         );
         let app = fixture.server.router();
-        let (blinded, _) = share::start(&Secret32::generate().unwrap(), None).unwrap();
+        let link = Secret32::generate().unwrap();
+        let (blinded, _) = share::start(&link, None).unwrap();
         let create = |chain: &'static str| {
-            let mut request = create_request(blinded, 1, 3600, false);
+            let mut request = create_request(&link, blinded, 1, 3600, false);
             request
                 .headers_mut()
                 .insert("x-forwarded-for", chain.parse().unwrap());
@@ -1141,7 +1342,8 @@ async fn ipv6_addresses_in_the_same_prefix_share_a_rate_bucket() {
         true,
     );
     let app = fixture.server.router();
-    let (blinded, _) = share::start(&Secret32::generate().unwrap(), None).unwrap();
+    let link = Secret32::generate().unwrap();
+    let (blinded, _) = share::start(&link, None).unwrap();
     for (ip, status) in [
         ("2001:db8:1:2::1", StatusCode::CREATED),
         ("2001:db8:1:2:ffff::2", StatusCode::TOO_MANY_REQUESTS),
@@ -1149,7 +1351,7 @@ async fn ipv6_addresses_in_the_same_prefix_share_a_rate_bucket() {
         ("::ffff:192.0.2.9", StatusCode::CREATED),
         ("192.0.2.9", StatusCode::TOO_MANY_REQUESTS),
     ] {
-        let mut request = create_request(blinded, 1, 3600, false);
+        let mut request = create_request(&link, blinded, 1, 3600, false);
         request
             .headers_mut()
             .insert("x-forwarded-for", ip.parse().unwrap());
@@ -1164,8 +1366,9 @@ async fn retry_after_rounds_up_the_time_until_a_token_refills() {
         ..Limits::default()
     });
     let app = fixture.server.router();
-    let (blinded, _) = share::start(&Secret32::generate().unwrap(), None).unwrap();
-    let create = || create_request(blinded, 1, 3600, false);
+    let link = Secret32::generate().unwrap();
+    let (blinded, _) = share::start(&link, None).unwrap();
+    let create = || create_request(&link, blinded, 1, 3600, false);
     for _ in 0..7 {
         assert_eq!(send(&app, create()).await.status, StatusCode::CREATED);
     }
@@ -1190,7 +1393,7 @@ async fn request_json_rejects_unknown_fields_and_incorrect_content_types() {
         body["unexpected"] = json!(true);
         body
     };
-    let create = create_request(blinded, 1, 3600, false);
+    let create = create_request(&pending.link, blinded, 1, 3600, false);
     let data = to_bytes(create.into_body(), 16_000).await.unwrap();
     let create_body = serde_json::from_slice(&data).unwrap();
     for request in [
@@ -1245,7 +1448,7 @@ async fn request_json_rejects_unknown_fields_and_incorrect_content_types() {
             .assert_error(StatusCode::BAD_REQUEST, "bad_request");
     }
     assert_eq!(pending.info(&app).await.json()["views_left"], 2);
-    let response = send(&app, eval_request(&pending.path, &blinded)).await;
+    let response = send(&app, pending.eval_request(&blinded)).await;
     assert_eq!(response.json()["attempts_left"], 4);
 }
 
@@ -1338,7 +1541,7 @@ async fn internal_errors_use_the_same_json_shape() {
         )
         .unwrap();
     let (blinded, _) = share::start(&pending.link, None).unwrap();
-    send(&app, eval_request(&pending.path, &blinded))
+    send(&app, pending.eval_request(&blinded))
         .await
         .assert_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
 }
@@ -1379,7 +1582,11 @@ async fn api_health_and_fallback_carry_the_required_headers() {
         ("/api/v1/unknown", StatusCode::NOT_FOUND, Some("no-store")),
         ("/api/v1/shares", StatusCode::NOT_FOUND, Some("no-store")),
     ] {
-        let response = send(&app, request(Method::GET, path, None, None, Body::empty())).await;
+        let response = if path == pending.path {
+            pending.info(&app).await
+        } else {
+            send(&app, request(Method::GET, path, None, None, Body::empty())).await
+        };
         assert_eq!(response.status, status);
         assert_security_headers(&response);
         assert_eq!(
@@ -1461,12 +1668,12 @@ async fn static_routes_serve_the_index_and_immutable_assets() {
     let web_dir = fixture.dir.path().join("web");
     let share_id = b64::encode(&share::generate_share_id().unwrap());
     let path = format!("/s/{share_id}");
-    let get = |path| request(Method::GET, path, None, None, Body::empty());
+    let get = |path: &str| request(Method::GET, path, None, None, Body::empty());
     for dir_exists in [false, true] {
         if dir_exists {
             fs::create_dir(&web_dir).unwrap();
         }
-        for route in ["/", &path] {
+        for route in ["/", "/security", &path] {
             send(&app, get(route))
                 .await
                 .assert_error(StatusCode::NOT_FOUND, "not_found");
@@ -1480,7 +1687,7 @@ async fn static_routes_serve_the_index_and_immutable_assets() {
     fs::write(web_dir.join("index.html"), html).unwrap();
     fs::write(web_dir.join("assets/nested/core-Ab3.wasm"), wasm).unwrap();
     fs::write(web_dir.join("assets/app-Ab3.js"), js).unwrap();
-    for route in ["/", &path] {
+    for route in ["/", "/security", &path] {
         let response = send(&app, get(route)).await;
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.body.as_ref(), html);
@@ -1511,6 +1718,27 @@ async fn static_routes_serve_the_index_and_immutable_assets() {
             response.headers[header::CACHE_CONTROL],
             "public, max-age=31536000, immutable"
         );
+        assert_security_headers(&response);
+    }
+    for (name, content_type, cache) in [
+        (
+            "robots.txt",
+            "text/plain; charset=utf-8",
+            "public, max-age=3600",
+        ),
+        (
+            "sitemap.xml",
+            "application/xml; charset=utf-8",
+            "public, max-age=3600",
+        ),
+        ("og.png", "image/png", "public, max-age=86400"),
+    ] {
+        fs::write(web_dir.join(name), name).unwrap();
+        let response = send(&app, get(&format!("/{name}"))).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, name);
+        assert_eq!(response.headers[header::CONTENT_TYPE], content_type);
+        assert_eq!(response.headers[header::CACHE_CONTROL], cache);
         assert_security_headers(&response);
     }
 }

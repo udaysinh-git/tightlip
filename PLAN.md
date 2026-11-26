@@ -41,7 +41,7 @@ An independent review covered commit `806ec31` and the deployment available at t
 
 A visitor with no account pastes text, fills in a login, or drops images and files. They pick an expiry, a view limit and an optional password, and get a link. The secret half of the link sits after the `#` and never reaches the server. The recipient opens the link, presses reveal, and reads or downloads the content. Link previews from chat apps cannot consume a view because nothing is spent until reveal.
 
-The server stores the share ID, expiry and pending deadline, password flag, view and attempt counts, wrapped OPRF key, encrypted manifest and files, access and owner verifier hashes, upload token hash, file indices, blob identifiers and ciphertext sizes. It also stores grant hashes and expiry times, hashes of successful open request IDs with their view counts and deadlines, the final-attempt deadline, storage accounting and pending blob deletions. File names and types are inside the encrypted manifest. The Rust process keeps IP buckets in memory. Proxy logging depends on the deployment.
+The server stores the share ID, expiry and pending deadline, password flag, view and attempt counts, wrapped OPRF key, encrypted manifest and files, evaluation, access and owner verifier hashes, upload token hash, file indices, blob identifiers and ciphertext sizes. It also stores grant hashes and expiry times, hashes of successful open request IDs with their view counts and deadlines, the final-attempt deadline, storage accounting and pending blob deletions. File names and types are inside the encrypted manifest. The Rust process keeps IP buckets in memory. Proxy logging depends on the deployment.
 
 ## Milestones
 
@@ -82,6 +82,8 @@ Identity keys, X-Wing key wrapping with sender authentication, contact pinning a
 ### Later
 
 Passkey sign in through the WebAuthn PRF extension, CLI, browser extension, key transparency log, pricing.
+
+After all shares created before evaluation authorization have expired, remove the null-verifier path for metadata and evaluation. Use the deployment's maximum configured TTL to determine when the last legacy share can expire.
 
 ## Open decisions
 

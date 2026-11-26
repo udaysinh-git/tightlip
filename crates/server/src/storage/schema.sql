@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS shares (
     manifest BLOB,
     access_verifier BLOB,
     owner_verifier BLOB,
-    final_attempt_until INTEGER
+    final_attempt_until INTEGER,
+    eval_verifier BLOB CHECK (length(eval_verifier) = 32)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS shares_expiry ON shares(expires_at);
 CREATE INDEX IF NOT EXISTS shares_pending ON shares(pending_until);

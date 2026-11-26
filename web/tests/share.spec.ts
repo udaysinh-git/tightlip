@@ -221,7 +221,8 @@ test("protected login accepts a correct password and allows the owner to delete 
     await recipient.getByRole("button", { name: "Break the seal" }).click();
     await expect(recipient.getByRole("alert")).toContainText("Wrong password. 7 tries left before this burns.");
     const metadata = await context.request.get(`${link.origin}/api/v1/shares/${link.pathname.slice(3)}`);
-    expect((await metadata.json()).views_left).toBe(3);
+    expect(metadata.status()).toBe(401);
+    expect(await metadata.json()).toEqual({ error: "unauthorized" });
     await recipient.getByLabel("Share password").fill(sharePassword);
     await recipient.getByRole("button", { name: "Break the seal" }).click();
     await expect(recipient.getByText("operator", { exact: true })).toBeVisible();

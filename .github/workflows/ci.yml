@@ -45,8 +45,24 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m venv .vector-venv
-      - run: .vector-venv/bin/python -m pip install 'cryptography==48.0.1' 'argon2-cffi==25.1.0'
-      - run: .vector-venv/bin/python tools/vectors/verify.py
+      - run: .vector-venv/bin/python -m pip install 'cryptography==48.0.1' 'argon2-cffi==25.1.0' 'PyNaCl==1.6.2'
+      - name: Build libsodium with the RFC 9380 ristretto255 hash-to-group API
+        shell: bash
+        run: |
+          revision=af0dd1b4ac417fe263d4f6255a57859e6ef85321
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location \
+            "https://codeload.github.com/jedisct1/libsodium/tar.gz/$revision" -o libsodium.tar.gz
+          echo 'c87cb379628883ec9d29ac32de05abef3a7f91621afae4ee53522f65b13de107  libsodium.tar.gz' | sha256sum --check
+          tar -xzf libsodium.tar.gz
+          cd "libsodium-$revision"
+          autoreconf -fi
+          ./configure --disable-static --prefix="$RUNNER_TEMP/vector-sodium"
+          make -j2
+          make install
+      - run: |
+          export TIGHTLIP_VECTOR_SODIUM="$RUNNER_TEMP/vector-sodium/lib/libsodium.so"
+          .vector-venv/bin/python tools/vectors/verify.py
   cargo-deny:
     runs-on: ubuntu-latest
     steps:

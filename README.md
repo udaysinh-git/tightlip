@@ -31,8 +31,10 @@ evaluation. An existing file grant can remain active for up to 10 minutes. A
 holder can keep plaintext or retain an earlier evaluation and ciphertext.
 Freed disk blocks and snapshots may preserve old data. Protect a randomly
 generated key encryption key (KEK) separately from the data volume. Old storage
-copies plus that key can expose wrapped OPRF keys. The current evaluation
-endpoint lets someone who knows the share ID spend attempts.
+copies plus that key can expose wrapped OPRF keys. New shares require a
+credential derived from the link secret to read share details or spend an
+attempt. Shares created before this change keep their original rules until
+expiry.
 
 The server delivers the JavaScript, so a compromised server can send code that
 steals plaintext, passwords or link secrets. Content security policy and
@@ -106,6 +108,9 @@ The container runs as UID and GID `65532` and probes `/healthz`.
 | --- | --- |
 | `TIGHTLIP_KEK_FILE` | Preferred. File containing unpadded base64url of 32 random bytes, optionally followed by a newline. Group and world read permissions are rejected on Unix. |
 | `TIGHTLIP_KEK` | Used when the file path is unset. Unpadded base64url of 32 random bytes. |
+| `TIGHTLIP_KEK_ID` | Nonzero current key ID, default 1. Assign a new ID when rotating the key. |
+| `TIGHTLIP_KEK_PREVIOUS_FILE` | Restricted file containing the previous key, in the same format as the current key file. |
+| `TIGHTLIP_KEK_PREVIOUS_ID` | ID of the previous key. Set it with the previous key file. ID 0 identifies old unprefixed wraps. |
 | `TIGHTLIP_DATA_DIR` | SQLite database and blobs. Defaults to `/data` in Docker and `./data` locally. |
 | `TIGHTLIP_WEB_DIR` | Built bundle. Defaults to `/app/web` in Docker and `./web/dist` locally. |
 | `PORT` | HTTP listen port. Defaults to `8080`. Match the container port in the proxy or port mapping. |
@@ -129,6 +134,19 @@ The following variables override the share limits.
 Keep the volume and the same KEK across container replacements. Store a backup
 of the KEK separately from the volume. If you lose the KEK, every live share
 becomes unreadable, even if you restore the volume.
+
+To rotate, stop the old server. Start with a new key and ID and supply the
+previous key file and its ID. Startup rewraps the active OPRF keys in one
+transaction. Remove the previous key settings after a successful startup.
+When upgrading an installation with unprefixed wraps, keep the current key
+and use the default ID to migrate them. Set previous ID 0 if changing the key
+during that upgrade. Retain any keys needed to restore older backups.
+
+The independent vector job installs PyNaCl, cryptography and argon2-cffi,
+and builds pinned libsodium for its ristretto255 API. To run
+`python tools/vectors/verify.py` locally, install the same Python dependencies
+and set `TIGHTLIP_VECTOR_SODIUM` to the shared library from that source revision.
+The CI workflow records the revision and build commands.
 
 ## Check the bundle
 

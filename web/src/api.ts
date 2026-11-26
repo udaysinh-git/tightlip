@@ -118,10 +118,10 @@ function upload(url: string, body: Blob, token: string, onProgress: (loaded: num
 }
 
 export async function createShare(
-  blinded: string, ttl_seconds: number, max_views: number, has_password: boolean,
+  blinded: string, eval_verifier: string, ttl_seconds: number, max_views: number, has_password: boolean,
 ) {
   const result = await json(await request("/shares", post({
-    suite: SUITE, blinded, ttl_seconds, max_views, has_password,
+    suite: SUITE, blinded, eval_verifier, ttl_seconds, max_views, has_password,
   }), 201));
   const { id, evaluated, upload_token, expires_at } = result;
   if (!base64url(id, 16) || !base64url(evaluated, 32)
@@ -147,8 +147,8 @@ export async function commitShare(
   await request(`${path(id)}/commit`, post({ access_verifier, owner_verifier }, token), 204);
 }
 
-export async function getMetadata(id: string) {
-  const result = await json(await request(path(id), {}, 200));
+export async function getMetadata(id: string, tag: string) {
+  const result = await json(await request(path(id), { headers: bearer(tag) }, 200));
   const { suite, has_password, expires_at, views_left } = result;
   if (suite !== SUITE) throw new Error("This link uses an unsupported version. Ask the sender for a new link.");
   if (typeof has_password !== "boolean" || !integer(expires_at, 0, maxDateSeconds) || !integer(views_left, 1)) {
@@ -159,8 +159,8 @@ export async function getMetadata(id: string) {
 
 export type Metadata = Awaited<ReturnType<typeof getMetadata>>;
 
-export async function evaluate(id: string, blinded: string) {
-  const result = await json(await request(`${path(id)}/eval`, post({ blinded }), 200));
+export async function evaluate(id: string, blinded: string, eval_tag: string) {
+  const result = await json(await request(`${path(id)}/eval`, post({ blinded, eval_tag }), 200));
   const { evaluated, attempts_left } = result;
   if (!base64url(evaluated, 32) || !integer(attempts_left)) throw new Error(malformed);
   return { evaluated, attempts_left };

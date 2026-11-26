@@ -53,6 +53,8 @@ pub enum ServerError {
     Storage,
     #[error("could not initialize cryptography")]
     Crypto,
+    #[error("could not rewrap stored OPRF keys")]
+    KeyRotation,
     #[error("could not sweep storage")]
     Sweep,
 }
@@ -65,6 +67,7 @@ struct State {
     blobs: Box<dyn Blobs>,
     clock: Arc<dyn Clock>,
     kek: Secret32,
+    kek_id: u32,
     dummy: Dummy,
     trust_proxy: bool,
     limits: Limits,
@@ -82,14 +85,30 @@ struct Dummy {
 
 impl Server {
     pub fn open(config: Config, clock: Arc<dyn Clock>) -> std::result::Result<Self, ServerError> {
-        if !valid_kek(&config.kek) {
+        if config.kek_id == 0
+            || !valid_kek(&config.kek)
+            || config
+                .previous_kek
+                .as_ref()
+                .is_some_and(|(id, key)| *id == config.kek_id || !valid_kek(key))
+        {
             return Err(ServerError::Crypto);
         }
-        let dummy = Dummy::new(&config.kek).map_err(|_| ServerError::Crypto)?;
+        let dummy = Dummy::new(&config.kek, config.kek_id).map_err(|_| ServerError::Crypto)?;
         let blobs = Disk::open(&config.data_dir).map_err(|_| ServerError::Storage)?;
-        let meta = Sqlite::open(&config.data_dir.join("tightlip.sqlite3"))
-            .map_err(|_| ServerError::Storage)?;
-        meta.sweep(clock.now()).map_err(|_| ServerError::Storage)?;
+        let now = clock.now();
+        let meta = Sqlite::open(
+            &config.data_dir.join("tightlip.sqlite3"),
+            now,
+            &config.kek,
+            config.kek_id,
+            config.previous_kek.as_ref(),
+        )
+        .map_err(|error| match error {
+            Error::KeyRotation => ServerError::KeyRotation,
+            _ => ServerError::Storage,
+        })?;
+        meta.sweep(now).map_err(|_| ServerError::Storage)?;
         blobs
             .reconcile(&meta.live_blobs().map_err(|_| ServerError::Storage)?)
             .map_err(|_| ServerError::Storage)?;
@@ -100,6 +119,7 @@ impl Server {
             blobs: Box::new(blobs),
             clock,
             kek: config.kek,
+            kek_id: config.kek_id,
             dummy,
             trust_proxy: config.trust_proxy,
             limits: config.limits,
@@ -145,10 +165,10 @@ impl Server {
 }
 
 impl Dummy {
-    fn new(kek: &Secret32) -> Result<Self> {
+    fn new(kek: &Secret32, kek_id: u32) -> Result<Self> {
         let id = share::generate_share_id().map_err(|_| Error::Internal)?;
         let key = ServerKey::generate().map_err(|_| Error::Internal)?;
-        let wrapped = share::wrap_oprf_key(kek, &id, &key).map_err(|_| Error::Internal)?;
+        let wrapped = share::wrap_oprf_key(kek, kek_id, &id, &key).map_err(|_| Error::Internal)?;
         let input = Secret32::generate().map_err(|_| Error::Internal)?;
         let (blinded, _) = oprf::blind(&input).map_err(|_| Error::Internal)?;
         Ok(Self {
